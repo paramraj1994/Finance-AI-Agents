@@ -68,4 +68,4 @@ df[cost_col] = pd.to_numeric(df[cost_col], errors="coerce")
 st.sidebar.header("🔧 Projection Assumptions")
 
 revenue_growth = st.sidebar.slider("Revenue Growth (%)", 0.0, 0.5, 0.12, 0.01)
-cost_grow_
+cost_growth = st.sidebar.slider("Cost Growth (%)", 0.0, 0.5, 0.08, 0.01)
