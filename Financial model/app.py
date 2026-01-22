@@ -11,13 +11,39 @@ st.set_page_config(
 )
 
 st.title("📊 Financial Model – Profit & Loss Statement")
-st.caption("Upload historical financials and generate projected P&L dynamically")
+st.caption("Historical P&L + Projections based on 2025")
+
+# -------------------------------------------------
+# Sidebar – Currency Conversion
+# -------------------------------------------------
+st.sidebar.header("💱 Currency Settings")
+
+base_currency = st.sidebar.selectbox(
+    "Base Currency (Excel)",
+    ["INR", "USD", "EUR"]
+)
+
+display_currency = st.sidebar.selectbox(
+    "Display Currency",
+    ["INR", "USD", "EUR"]
+)
+
+# Simple conversion matrix (editable)
+fx_rates = {
+    "INR": {"INR": 1, "USD": 0.012, "EUR": 0.011},
+    "USD": {"INR": 83, "USD": 1, "EUR": 0.92},
+    "EUR": {"INR": 90, "USD": 1.09, "EUR": 1}
+}
+
+fx = fx_rates[base_currency][display_currency]
+
+currency_symbol = {"INR": "₹", "USD": "$", "EUR": "€"}[display_currency]
 
 # -------------------------------------------------
 # Upload Excel
 # -------------------------------------------------
 uploaded_file = st.file_uploader(
-    "📂 Upload your historical financial Excel file",
+    "📂 Upload your historical P&L Excel file",
     type=["xlsx"]
 )
 
@@ -27,11 +53,14 @@ if uploaded_file is None:
 
 df = pd.read_excel(uploaded_file)
 
-st.subheader("📄 Uploaded Historical Data (Preview)")
+# -------------------------------------------------
+# Display Historical Data
+# -------------------------------------------------
+st.subheader("📄 Historical Financials (As Uploaded)")
 st.dataframe(df)
 
 # -------------------------------------------------
-# Sidebar Assumptions
+# Assumptions
 # -------------------------------------------------
 st.sidebar.header("🔧 Projection Assumptions")
 
@@ -39,8 +68,8 @@ revenue_growth = st.sidebar.slider(
     "Revenue Growth (%)", 0.0, 0.5, 0.12, 0.01
 )
 
-ebitda_margin = st.sidebar.slider(
-    "EBITDA Margin (%)", 0.05, 0.6, 0.25, 0.01
+cost_growth = st.sidebar.slider(
+    "Cost Growth (%)", 0.0, 0.5, 0.08, 0.01
 )
 
 tax_rate = st.sidebar.slider(
@@ -48,96 +77,21 @@ tax_rate = st.sidebar.slider(
 )
 
 projection_years = st.sidebar.number_input(
-    "Number of Projection Years",
+    "Projection Years",
     min_value=1,
     max_value=10,
     value=3
 )
 
 # -------------------------------------------------
-# Identify Historical Revenue
+# Extract 2025 Base Values
+# EXPECTED Excel FORMAT:
+# Columns: Year | Revenue | Cost
 # -------------------------------------------------
-st.subheader("📌 Base Inputs")
+if 2025 not in df["Year"].values:
+    st.error("Year 2025 not found in uploaded Excel.")
+    st.stop()
 
-base_revenue = st.number_input(
-    "Last Historical Year Revenue",
-    min_value=0.0,
-    value=1000.0,
-    step=100.0
-)
+base_row = df[df["Year"] == 2025].iloc[0]
 
-last_year = st.number_input(
-    "Last Historical Year",
-    min_value=2000,
-    max_value=2100,
-    value=2025
-)
-
-# -------------------------------------------------
-# Build P&L Model
-# -------------------------------------------------
-years = [str(last_year + i) for i in range(1, projection_years + 1)]
-
-pnl_data = {
-    "Revenue": [],
-    "EBITDA": [],
-    "Tax": [],
-    "Profit After Tax": []
-}
-
-revenue = base_revenue
-
-for _ in years:
-    revenue = revenue * (1 + revenue_growth)
-    ebitda = revenue * ebitda_margin
-    tax = ebitda * tax_rate
-    pat = ebitda - tax
-
-    pnl_data["Revenue"].append(revenue)
-    pnl_data["EBITDA"].append(ebitda)
-    pnl_data["Tax"].append(tax)
-    pnl_data["Profit After Tax"].append(pat)
-
-pnl_df = pd.DataFrame(pnl_data, index=years).T
-
-# -------------------------------------------------
-# Display P&L Statement
-# -------------------------------------------------
-st.subheader("📑 Projected Profit & Loss Statement")
-
-st.dataframe(
-    pnl_df.style
-    .format("{:,.0f}")
-    .set_properties(**{"text-align": "right"})
-)
-
-# -------------------------------------------------
-# Charts Section
-# -------------------------------------------------
-st.subheader("📈 Financial Trend Analysis")
-
-fig, ax = plt.subplots()
-ax.plot(pnl_df.columns, pnl_df.loc["Revenue"], marker="o", label="Revenue")
-ax.plot(pnl_df.columns, pnl_df.loc["EBITDA"], marker="o", label="EBITDA")
-ax.plot(pnl_df.columns, pnl_df.loc["Profit After Tax"], marker="o", label="PAT")
-
-ax.set_xlabel("Year")
-ax.set_ylabel("Amount")
-ax.legend()
-ax.grid(True)
-
-st.pyplot(fig)
-
-# -------------------------------------------------
-# Download P&L
-# -------------------------------------------------
-st.subheader("⬇️ Download P&L Statement")
-
-csv = pnl_df.reset_index().rename(columns={"index": "Line Item"}).to_csv(index=False)
-
-st.download_button(
-    label="Download P&L as CSV",
-    data=csv,
-    file_name="Profit_and_Loss_Statement.csv",
-    mime="text/csv"
-)
+base_revenue = base_
