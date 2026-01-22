@@ -3,7 +3,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 # -------------------------------------------------
-# Page Configuration
+# Page Config
 # -------------------------------------------------
 st.set_page_config(
     page_title="Financial Model – Profit & Loss",
@@ -11,24 +11,16 @@ st.set_page_config(
 )
 
 st.title("📊 Financial Model – Profit & Loss Statement")
-st.caption("Historical P&L + Projections based on 2025")
+st.caption("Historical P&L + Projections (2025 as Base Year)")
 
 # -------------------------------------------------
-# Sidebar – Currency Conversion
+# Sidebar – Currency
 # -------------------------------------------------
 st.sidebar.header("💱 Currency Settings")
 
-base_currency = st.sidebar.selectbox(
-    "Base Currency (Excel)",
-    ["INR", "USD", "EUR"]
-)
+base_currency = st.sidebar.selectbox("Base Currency", ["INR", "USD", "EUR"])
+display_currency = st.sidebar.selectbox("Display Currency", ["INR", "USD", "EUR"])
 
-display_currency = st.sidebar.selectbox(
-    "Display Currency",
-    ["INR", "USD", "EUR"]
-)
-
-# Simple conversion matrix (editable)
 fx_rates = {
     "INR": {"INR": 1, "USD": 0.012, "EUR": 0.011},
     "USD": {"INR": 83, "USD": 1, "EUR": 0.92},
@@ -36,7 +28,6 @@ fx_rates = {
 }
 
 fx = fx_rates[base_currency][display_currency]
-
 currency_symbol = {"INR": "₹", "USD": "$", "EUR": "€"}[display_currency]
 
 # -------------------------------------------------
@@ -48,50 +39,33 @@ uploaded_file = st.file_uploader(
 )
 
 if uploaded_file is None:
-    st.info("Please upload an Excel file to continue.")
     st.stop()
 
 df = pd.read_excel(uploaded_file)
 
-# -------------------------------------------------
-# Display Historical Data
-# -------------------------------------------------
-st.subheader("📄 Historical Financials (As Uploaded)")
+st.subheader("📄 Uploaded Historical Data")
 st.dataframe(df)
+
+# -------------------------------------------------
+# Column Mapping (CRITICAL FIX)
+# -------------------------------------------------
+st.subheader("🧭 Map Excel Columns")
+
+columns = df.columns.tolist()
+
+year_col = st.selectbox("Select Year column", columns)
+revenue_col = st.selectbox("Select Revenue column", columns)
+cost_col = st.selectbox("Select Cost column", columns)
+
+# Ensure numeric
+df[year_col] = pd.to_numeric(df[year_col], errors="coerce")
+df[revenue_col] = pd.to_numeric(df[revenue_col], errors="coerce")
+df[cost_col] = pd.to_numeric(df[cost_col], errors="coerce")
 
 # -------------------------------------------------
 # Assumptions
 # -------------------------------------------------
 st.sidebar.header("🔧 Projection Assumptions")
 
-revenue_growth = st.sidebar.slider(
-    "Revenue Growth (%)", 0.0, 0.5, 0.12, 0.01
-)
-
-cost_growth = st.sidebar.slider(
-    "Cost Growth (%)", 0.0, 0.5, 0.08, 0.01
-)
-
-tax_rate = st.sidebar.slider(
-    "Tax Rate (%)", 0.1, 0.4, 0.25, 0.01
-)
-
-projection_years = st.sidebar.number_input(
-    "Projection Years",
-    min_value=1,
-    max_value=10,
-    value=3
-)
-
-# -------------------------------------------------
-# Extract 2025 Base Values
-# EXPECTED Excel FORMAT:
-# Columns: Year | Revenue | Cost
-# -------------------------------------------------
-if 2025 not in df["Year"].values:
-    st.error("Year 2025 not found in uploaded Excel.")
-    st.stop()
-
-base_row = df[df["Year"] == 2025].iloc[0]
-
-base_revenue = base_
+revenue_growth = st.sidebar.slider("Revenue Growth (%)", 0.0, 0.5, 0.12, 0.01)
+cost_grow_
