@@ -8,14 +8,13 @@ import matplotlib.pyplot as plt
 # =================================================
 st.set_page_config(page_title="Financial Model – Investor View", layout="wide")
 st.title("📊 Financial Model – Investor-Ready Valuation Model")
-st.caption("Clean tables • no index column • proper formatting • detailed DCF")
+st.caption("Clean tables • no index column • proper formatting • detailed DCF • editable scenarios")
 
 # =================================================
 # CSS – CENTER ALIGN ALL TABLE CELLS
 # =================================================
 st.markdown("""
 <style>
-/* Center align cells/headers in data editor tables */
 div[data-testid="stDataEditor"] table th,
 div[data-testid="stDataEditor"] table td {
     text-align: center !important;
@@ -72,24 +71,40 @@ discount_rate = st.sidebar.slider("WACC", 0.08, 0.18, 0.12, 0.01)
 terminal_growth = st.sidebar.slider("Terminal Growth Rate", 0.02, 0.06, 0.04, 0.005)
 
 # =================================================
-# SCENARIOS + TOGGLE
+# EDITABLE SCENARIOS (Revenue growth + EBITDA margin)
 # =================================================
+st.sidebar.header("📌 Scenario Inputs (Editable)")
+
+bear_growth = st.sidebar.number_input("Bear: Revenue Growth (%)", value=7.00, step=0.50) / 100
+bear_margin = st.sidebar.number_input("Bear: EBITDA Margin (%)", value=20.00, step=0.50) / 100
+
+base_growth = st.sidebar.number_input("Base: Revenue Growth (%)", value=12.00, step=0.50) / 100
+base_margin = st.sidebar.number_input("Base: EBITDA Margin (%)", value=25.00, step=0.50) / 100
+
+bull_growth = st.sidebar.number_input("Bull: Revenue Growth (%)", value=18.00, step=0.50) / 100
+bull_margin = st.sidebar.number_input("Bull: EBITDA Margin (%)", value=30.00, step=0.50) / 100
+
 scenarios = {
-    "Bear": {"growth": 0.07, "margin": 0.20},
-    "Base": {"growth": 0.12, "margin": 0.25},
-    "Bull": {"growth": 0.18, "margin": 0.30},
+    "Bear": {"growth": bear_growth, "margin": bear_margin},
+    "Base": {"growth": base_growth, "margin": base_margin},
+    "Bull": {"growth": bull_growth, "margin": bull_margin},
 }
 
-st.subheader("📌 Scenario Assumptions")
-assump = pd.DataFrame(
-    {
-        "Scenario": list(scenarios.keys()),
-        "Revenue Growth": [fmt_pct_2(v["growth"] * 100) for v in scenarios.values()],
-        "EBITDA Margin": [fmt_pct_2(v["margin"] * 100) for v in scenarios.values()],
-    }
-)
+# =================================================
+# SCENARIO ASSUMPTIONS TABLE
+# =================================================
+st.subheader("📌 Scenario Assumptions (Current)")
+
+assump = pd.DataFrame({
+    "Scenario": list(scenarios.keys()),
+    "Revenue Growth": [fmt_pct_2(v["growth"] * 100) for v in scenarios.values()],
+    "EBITDA Margin": [fmt_pct_2(v["margin"] * 100) for v in scenarios.values()],
+})
 show_table(assump)
 
+# =================================================
+# TOGGLE SCENARIO
+# =================================================
 selected = st.radio("🎯 Select Scenario", list(scenarios.keys()), horizontal=True)
 growth = scenarios[selected]["growth"]
 margin = scenarios[selected]["margin"]
@@ -107,7 +122,7 @@ for _ in years:
     ebitda = revenue * margin
     tax = ebitda * tax_rate
     pat = ebitda - tax
-    fcf = pat * (1 - reinvestment_rate)  # proxy = PAT minus reinvestment
+    fcf = pat * (1 - reinvestment_rate)
     rows.append([revenue, ebitda, tax, pat, fcf])
 
 df = pd.DataFrame(rows, columns=["Revenue", "EBITDA", "Tax", "PAT", "FCF"], index=years)
@@ -126,7 +141,7 @@ ax.set_ylabel("Amount")
 st.pyplot(fig)
 
 # =================================================
-# PROFIT & LOSS STATEMENT (readable headings)
+# PROFIT & LOSS STATEMENT
 # =================================================
 pnl = pd.DataFrame({"Line Item": [
     "Revenue",
@@ -152,7 +167,7 @@ for y in years:
 show_table(pnl, "📑 Profit & Loss Statement")
 
 # =================================================
-# CASH FLOW STATEMENT (explained)
+# CASH FLOW STATEMENT
 # =================================================
 cf = pd.DataFrame({"Line Item": [
     "Profit After Tax (PAT)",
@@ -172,7 +187,7 @@ for y in years:
 show_table(cf, "💵 Cash Flow Statement")
 
 # =================================================
-# DCF – DETAILED (per-year discounting)
+# DCF – DETAILED (per-year)
 # =================================================
 discount_factors = []
 pv_fcf = []
@@ -220,7 +235,6 @@ tv = pd.DataFrame({
         fmt_currency(pv_terminal),
     ]
 })
-
 show_table(tv, "📘 Terminal Value Calculation (Detailed)")
 
 # =================================================
@@ -240,7 +254,6 @@ ev = pd.DataFrame({
         fmt_currency(enterprise_value),
     ]
 })
-
 show_table(ev, "🏁 Enterprise Value Summary")
 st.metric("Enterprise Value", fmt_currency(enterprise_value))
 
@@ -248,7 +261,6 @@ st.metric("Enterprise Value", fmt_currency(enterprise_value))
 # DOWNLOAD (numeric model)
 # =================================================
 st.subheader("⬇️ Download Selected Scenario (Numeric Model)")
-
 download_df = df.copy()
 download_df["Discount Factor"] = discount_factors
 download_df["PV of FCF"] = pv_fcf
@@ -264,18 +276,18 @@ st.download_button(
 with st.expander("🧠 Explanation (End-to-End)"):
     st.markdown(f"""
 ### Profit & Loss
-- Revenue grows annually using scenario growth (**{growth:.0%}**)
-- EBITDA = Revenue × EBITDA Margin (**{margin:.0%}**)
-- Tax = EBITDA × Tax Rate (**{tax_rate:.0%}**)
+- Revenue grows annually using scenario growth (**{growth:.2%}**)
+- EBITDA = Revenue × EBITDA Margin (**{margin:.2%}**)
+- Tax = EBITDA × Tax Rate (**{tax_rate:.2%}**)
 - PAT = EBITDA − Tax
 
 ### Cash Flow
-- Reinvestment = PAT × Reinvestment Rate (**{reinvestment_rate:.0%}**)
+- Reinvestment = PAT × Reinvestment Rate (**{reinvestment_rate:.2%}**)
 - FCF = PAT − Reinvestment
 
 ### DCF Valuation
-- Discount Factorₜ = 1/(1+WACC)ᵗ where WACC = **{discount_rate:.0%}**
+- Discount Factorₜ = 1/(1+WACC)ᵗ where WACC = **{discount_rate:.2%}**
 - PV of FCF = FCFₜ × Discount Factorₜ
-- Terminal Value = FCF_last × (1+g) / (WACC − g) where g = **{terminal_growth:.0%}**
+- Terminal Value = FCF_last × (1+g) / (WACC − g) where g = **{terminal_growth:.2%}**
 - Enterprise Value = Sum(PV of FCF) + PV of Terminal Value
 """)
