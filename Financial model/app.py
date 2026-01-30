@@ -8,18 +8,26 @@ import matplotlib.pyplot as plt
 # =================================================
 st.set_page_config(page_title="Financial Model – Investor View", layout="wide")
 st.title("📊 Financial Model – Investor-Ready Valuation Model")
-st.caption("Clean tables • no index column • proper formatting • detailed DCF • scenario editing")
+st.caption("Financial Model • Dashboard • Scenario Editing • Detailed DCF")
 
 # =================================================
-# CSS – CENTER ALIGN ALL TABLE CELLS
+# CSS – CENTER ALIGN TABLE CELLS + TOP NAV BUTTONS
 # =================================================
 st.markdown("""
 <style>
+/* Center align cells/headers in data editor tables */
 div[data-testid="stDataEditor"] table th,
 div[data-testid="stDataEditor"] table td {
     text-align: center !important;
     vertical-align: middle !important;
     white-space: nowrap;
+}
+
+/* Make top nav buttons look like tabs */
+div[data-testid="stHorizontalBlock"] button[kind="secondary"]{
+    border-radius: 10px;
+    padding: 0.45rem 1rem;
+    font-weight: 600;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -92,7 +100,6 @@ edit_scenario = st.sidebar.selectbox(
     options=["Bear", "Base", "Bull"]
 )
 
-# Pull current values
 current_growth = scenarios[edit_scenario]["growth"] * 100
 current_margin = scenarios[edit_scenario]["margin"] * 100
 
@@ -126,9 +133,25 @@ assump = pd.DataFrame({
 show_table(assump)
 
 # =================================================
-# TOGGLE SCENARIO FOR MODEL OUTPUT
+# TOP NAV BUTTONS: Financial Model vs Dashboard
 # =================================================
-selected = st.radio("🎯 Select Scenario to Run Model", list(scenarios.keys()), horizontal=True)
+if "view" not in st.session_state:
+    st.session_state["view"] = "Financial Model"
+
+nav1, nav2, _ = st.columns([1, 1, 6])
+with nav1:
+    if st.button("📑 Financial Model", type="secondary"):
+        st.session_state["view"] = "Financial Model"
+with nav2:
+    if st.button("📊 Dashboard", type="secondary"):
+        st.session_state["view"] = "Dashboard"
+
+st.divider()
+
+# =================================================
+# TOGGLE SCENARIO FOR OUTPUT
+# =================================================
+selected = st.radio("🎯 Select Scenario to Run", list(scenarios.keys()), horizontal=True)
 growth = scenarios[selected]["growth"]
 margin = scenarios[selected]["margin"]
 
@@ -150,22 +173,81 @@ for _ in years:
 
 df = pd.DataFrame(rows, columns=["Revenue", "EBITDA", "Tax", "PAT", "FCF"], index=years)
 
-# =================================================
-# TREND CHART
-# =================================================
-st.subheader(f"📈 {selected} Case – Financial Trends")
-fig, ax = plt.subplots()
-ax.plot(df.index, df["Revenue"], marker="o", label="Revenue")
-ax.plot(df.index, df["EBITDA"], marker="o", label="EBITDA")
-ax.plot(df.index, df["PAT"], marker="o", label="PAT")
-ax.legend()
-ax.grid(True)
-ax.set_ylabel("Amount")
-st.pyplot(fig)
+# Derived series
+df_calc = df.copy()
+df_calc["Revenue Growth (%)"] = df_calc["Revenue"].pct_change() * 100
+df_calc["EBITDA Margin (%)"] = (df_calc["EBITDA"] / df_calc["Revenue"]) * 100
 
 # =================================================
-# PROFIT & LOSS STATEMENT
+# DASHBOARD VIEW (TAB)
 # =================================================
+if st.session_state["view"] == "Dashboard":
+    st.subheader("📊 Dashboard")
+
+    # --- 1) Revenue + Revenue Growth in one chart ---
+    st.markdown("### Revenue & Revenue Growth (%)")
+    fig, ax1 = plt.subplots()
+
+    ax1.plot(df_calc.index, df_calc["Revenue"], marker="o", label="Revenue")
+    ax1.set_ylabel("Revenue")
+
+    ax2 = ax1.twinx()
+    ax2.plot(df_calc.index, df_calc["Revenue Growth (%)"], marker="o", linestyle="--", label="Revenue Growth (%)")
+    ax2.set_ylabel("Revenue Growth (%)")
+
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax1.legend(lines1 + lines2, labels1 + labels2, loc="best")
+    ax1.grid(True)
+
+    st.pyplot(fig)
+
+    # --- 2) EBITDA + EBITDA Margin in one chart ---
+    st.markdown("### EBITDA & EBITDA Margin (%)")
+    fig, ax1 = plt.subplots()
+
+    ax1.plot(df_calc.index, df_calc["EBITDA"], marker="o", label="EBITDA")
+    ax1.set_ylabel("EBITDA")
+
+    ax2 = ax1.twinx()
+    ax2.plot(df_calc.index, df_calc["EBITDA Margin (%)"], marker="o", linestyle="--", label="EBITDA Margin (%)")
+    ax2.set_ylabel("EBITDA Margin (%)")
+
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax1.legend(lines1 + lines2, labels1 + labels2, loc="best")
+    ax1.grid(True)
+
+    st.pyplot(fig)
+
+    # --- 3) PAT chart ---
+    st.markdown("### Profit After Tax (PAT)")
+    fig, ax = plt.subplots()
+    ax.plot(df_calc.index, df_calc["PAT"], marker="o", label="PAT")
+    ax.set_ylabel("PAT")
+    ax.grid(True)
+    ax.legend(loc="best")
+    st.pyplot(fig)
+
+    # --- 4) FCF chart ---
+    st.markdown("### Free Cash Flow (FCF)")
+    fig, ax = plt.subplots()
+    ax.plot(df_calc.index, df_calc["FCF"], marker="o", label="FCF")
+    ax.set_ylabel("FCF")
+    ax.grid(True)
+    ax.legend(loc="best")
+    st.pyplot(fig)
+
+    st.stop()
+
+# =================================================
+# FINANCIAL MODEL VIEW
+# =================================================
+st.subheader("📑 Financial Model")
+
+# -------------------------------------------------
+# Profit & Loss Statement
+# -------------------------------------------------
 pnl = pd.DataFrame({"Line Item": [
     "Revenue",
     "Revenue Growth (%)",
@@ -189,9 +271,9 @@ for y in years:
 
 show_table(pnl, "📑 Profit & Loss Statement")
 
-# =================================================
-# CASH FLOW STATEMENT
-# =================================================
+# -------------------------------------------------
+# Cash Flow Statement
+# -------------------------------------------------
 cf = pd.DataFrame({"Line Item": [
     "Profit After Tax (PAT)",
     "Reinvestment Rate (% of PAT)",
@@ -209,9 +291,9 @@ for y in years:
 
 show_table(cf, "💵 Cash Flow Statement")
 
-# =================================================
-# DCF – DETAILED (per-year)
-# =================================================
+# -------------------------------------------------
+# DCF – Detailed
+# -------------------------------------------------
 discount_factors = []
 pv_fcf = []
 
@@ -235,9 +317,9 @@ for i, y in enumerate(years):
 
 show_table(dcf_detail, "💰 Discounted Cash Flow (Detailed)")
 
-# =================================================
-# TERMINAL VALUE – FULL BREAKDOWN
-# =================================================
+# -------------------------------------------------
+# Terminal Value – Detailed
+# -------------------------------------------------
 last_fcf = df["FCF"].iloc[-1]
 terminal_value = (last_fcf * (1 + terminal_growth)) / (discount_rate - terminal_growth)
 pv_terminal = terminal_value * discount_factors[-1]
@@ -260,9 +342,9 @@ tv = pd.DataFrame({
 })
 show_table(tv, "📘 Terminal Value Calculation (Detailed)")
 
-# =================================================
-# ENTERPRISE VALUE SUMMARY
-# =================================================
+# -------------------------------------------------
+# Enterprise Value Summary
+# -------------------------------------------------
 enterprise_value = sum(pv_fcf) + pv_terminal
 
 ev = pd.DataFrame({
@@ -280,15 +362,15 @@ ev = pd.DataFrame({
 show_table(ev, "🏁 Enterprise Value Summary")
 st.metric("Enterprise Value", fmt_currency(enterprise_value))
 
-# =================================================
-# DOWNLOAD (numeric model)
-# =================================================
+# -------------------------------------------------
+# Download (numeric model)
+# -------------------------------------------------
 st.subheader("⬇️ Download Selected Scenario (Numeric Model)")
 download_df = df.copy()
 download_df["Discount Factor"] = discount_factors
 download_df["PV of FCF"] = pv_fcf
-
 csv = download_df.reset_index().rename(columns={"index": "Year"}).to_csv(index=False)
+
 st.download_button(
     f"Download {selected} Case CSV",
     csv,
