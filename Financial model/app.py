@@ -8,22 +8,7 @@ import matplotlib.pyplot as plt
 # -------------------------------------------------
 st.set_page_config(page_title="Financial Model – Scenario Valuation", layout="wide")
 st.title("📊 Financial Model – Scenario-Based Valuation")
-st.caption("Profit & Loss • Cash Flow • Valuation Summary")
-
-# -------------------------------------------------
-# File Upload (Optional)
-# -------------------------------------------------
-uploaded_file = st.file_uploader(
-    "📂 Upload Historical Financials (Excel – optional)",
-    type=["xlsx"]
-)
-
-if uploaded_file is not None:
-    hist_df = pd.read_excel(uploaded_file)
-    st.subheader("📄 Uploaded Data Preview")
-    st.dataframe(hist_df)
-else:
-    st.info("No file uploaded. Model will use manual assumptions.")
+st.caption("Vertical Financial Statements | Scenario Toggle | DCF")
 
 # -------------------------------------------------
 # Sidebar – Global Assumptions
@@ -38,7 +23,7 @@ terminal_growth = st.sidebar.slider("Terminal Growth Rate", 0.02, 0.06, 0.04, 0.
 base_revenue = st.sidebar.number_input(
     "Last Historical Revenue",
     min_value=0.0,
-    value=1000.0,
+    value=1120.0,
     step=100.0
 )
 
@@ -76,26 +61,29 @@ years = [f"Year {i+1}" for i in range(projection_years)]
 # -------------------------------------------------
 # Financial Model
 # -------------------------------------------------
-def build_model(growth, margin):
-    revenue = base_revenue
-    rows = []
+revenue = base_revenue
+data = {
+    "Revenue": [],
+    "EBITDA": [],
+    "Tax": [],
+    "PAT": [],
+    "FCF": []
+}
 
-    for _ in years:
-        revenue *= (1 + growth)
-        ebitda = revenue * margin
-        tax = ebitda * tax_rate
-        pat = ebitda - tax
-        fcf = pat * 0.9  # simple, explainable proxy
+for _ in years:
+    revenue *= (1 + growth)
+    ebitda = revenue * margin
+    tax = ebitda * tax_rate
+    pat = ebitda - tax
+    fcf = pat * 0.9
 
-        rows.append([revenue, ebitda, tax, pat, fcf])
+    data["Revenue"].append(revenue)
+    data["EBITDA"].append(ebitda)
+    data["Tax"].append(tax)
+    data["PAT"].append(pat)
+    data["FCF"].append(fcf)
 
-    return pd.DataFrame(
-        rows,
-        columns=["Revenue", "EBITDA", "Tax", "PAT", "FCF"],
-        index=years
-    )
-
-model_df = build_model(growth, margin)
+model_df = pd.DataFrame(data, index=years)
 
 # -------------------------------------------------
 # Trend Chart
@@ -112,102 +100,92 @@ ax.grid(True)
 st.pyplot(fig)
 
 # =================================================
-# TABLE 1: PROFIT & LOSS STATEMENT
+# TABLE 1: PROFIT & LOSS (VERTICAL)
 # =================================================
-st.subheader("📑 Profit & Loss Statement")
+st.subheader("📑 Profit & Loss Statement (Vertical)")
 
-pnl_table = model_df[[
-    "Revenue",
-    "EBITDA",
-    "Tax",
-    "PAT"
-]]
+pnl_vertical = pd.DataFrame({
+    "Revenue": model_df["Revenue"],
+    "EBITDA": model_df["EBITDA"],
+    "Tax": model_df["Tax"],
+    "Profit After Tax (PAT)": model_df["PAT"]
+}).T
 
 st.dataframe(
-    pnl_table.style.format({
-        "Revenue": "{:,.0f}",
-        "EBITDA": "{:,.0f}",
-        "Tax": "{:,.0f}",
-        "PAT": "{:,.0f}",
-    })
+    pnl_vertical.style.format("{:,.0f}")
 )
 
 # =================================================
-# TABLE 2: CASH FLOW STATEMENT
+# TABLE 2: CASH FLOW STATEMENT (VERTICAL)
 # =================================================
-st.subheader("💵 Cash Flow Statement")
+st.subheader("💵 Cash Flow Statement (Vertical)")
 
-cashflow_df = pd.DataFrame(index=model_df.index)
-
-cashflow_df["Profit After Tax"] = model_df["PAT"]
-cashflow_df["Less: Reinvestment (10%)"] = -0.10 * model_df["PAT"]
-cashflow_df["Free Cash Flow"] = model_df["FCF"]
+cashflow_vertical = pd.DataFrame({
+    "Profit After Tax": model_df["PAT"],
+    "Less: Reinvestment (10%)": -0.10 * model_df["PAT"],
+    "Free Cash Flow": model_df["FCF"]
+}).T
 
 st.dataframe(
-    cashflow_df.style.format("{:,.0f}")
+    cashflow_vertical.style.format("{:,.0f}")
 )
 
 # =================================================
 # DCF CALCULATION
 # =================================================
-model_df = model_df.copy()
-
-model_df["Discount Factor"] = [
+discount_factors = [
     1 / (1 + discount_rate) ** (i + 1)
     for i in range(len(model_df))
 ]
 
-model_df["PV of FCF"] = model_df["FCF"] * model_df["Discount Factor"]
+pv_fcf = model_df["FCF"].values * discount_factors
 
 terminal_value = (
     model_df["FCF"].iloc[-1] * (1 + terminal_growth)
     / (discount_rate - terminal_growth)
 )
 
-pv_terminal_value = terminal_value * model_df["Discount Factor"].iloc[-1]
-enterprise_value = model_df["PV of FCF"].sum() + pv_terminal_value
+pv_terminal_value = terminal_value * discount_factors[-1]
+enterprise_value = pv_fcf.sum() + pv_terminal_value
 
 # =================================================
-# TABLE 3: VALUATION SUMMARY
+# TABLE 3: VALUATION SUMMARY (VERTICAL)
 # =================================================
-st.subheader("💰 Valuation Summary")
+st.subheader("💰 Valuation Summary (Vertical)")
 
-valuation_df = pd.DataFrame({
-    "Item": [
-        "PV of Free Cash Flows (Projection Period)",
+valuation_vertical = pd.DataFrame(
+    {
+        "Amount": [
+            pv_fcf.sum(),
+            terminal_value,
+            pv_terminal_value,
+            enterprise_value
+        ]
+    },
+    index=[
+        "PV of Free Cash Flows",
         "Terminal Value",
         "PV of Terminal Value",
         "Enterprise Value"
-    ],
-    "Amount": [
-        model_df["PV of FCF"].sum(),
-        terminal_value,
-        pv_terminal_value,
-        enterprise_value
     ]
-})
+)
 
 st.dataframe(
-    valuation_df.style.format({"Amount": "{:,.0f}"})
+    valuation_vertical.style.format("{:,.0f}")
 )
 
 st.metric("Enterprise Value", f"{enterprise_value:,.0f}")
 
 # -------------------------------------------------
-# Download
+# Explanation Block
 # -------------------------------------------------
-st.subheader("⬇️ Download Selected Scenario Model")
+with st.expander("🧠 How EBITDA of 280 is calculated from Revenue 1120"):
+    st.write("""
+**EBITDA = Revenue × EBITDA Margin**
 
-download_df = pd.concat(
-    [pnl_table, cashflow_df, model_df[["Discount Factor", "PV of FCF"]]],
-    axis=1
-)
+Example (Base Case):
+- Revenue = 1,120
+- EBITDA Margin = 25%
 
-csv = download_df.reset_index().rename(columns={"index": "Year"}).to_csv(index=False)
-
-st.download_button(
-    f"Download {selected_scenario} Case CSV",
-    csv,
-    f"{selected_scenario}_Financial_Model.csv",
-    "text/csv"
-)
+**EBITDA = 1,120 × 25% = 280**
+""")
