@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 # =================================================
 st.set_page_config(page_title="Financial Model – Investor Suite", layout="wide")
 st.title("📊 Financial Model – Investor Suite")
-st.caption("Scenario modeling • year-wise assumptions • detailed DCF • dashboard • export • save/load assumptions")
+st.caption("Scenario modeling • detailed DCF • sensitivity • dashboard • export • save/load assumptions")
 
 # =================================================
 # CSS – Center align tables (st.data_editor)
@@ -31,7 +31,7 @@ st.markdown(
 )
 
 # =================================================
-# Helpers: formatting + display
+# Helpers: formatting + table display
 # =================================================
 def fmt_currency(x):
     try:
@@ -124,8 +124,13 @@ def dual_axis_line_chart(title, x_labels, y_left, y_right,
     return fig
 
 # =================================================
-# Defaults + session init
+# Defaults
 # =================================================
+DEFAULT_SCENARIOS = {
+    "Bear": {"growth_start": 7.0, "growth_end": 5.0, "margin_start": 20.0, "margin_end": 22.0},
+    "Base": {"growth_start": 12.0, "growth_end": 10.0, "margin_start": 25.0, "margin_end": 27.0},
+    "Bull": {"growth_start": 18.0, "growth_end": 14.0, "margin_start": 30.0, "margin_end": 32.0},
+}
 DEFAULT_GLOBALS = {
     "projection_years": 5,
     "tax_rate_pct": 25.0,
@@ -138,27 +143,111 @@ DEFAULT_GLOBALS = {
     "cash": 0.0,
     "exit_multiple": 10.0,
 }
-DEFAULT_SCENARIOS = {
-    "Bear": {"growth_by_year_pct": [7, 7, 6, 6, 5], "margin_by_year_pct": [20, 20, 21, 21, 22]},
-    "Base": {"growth_by_year_pct": [12, 12, 11, 11, 10], "margin_by_year_pct": [25, 25, 26, 26, 27]},
-    "Bull": {"growth_by_year_pct": [18, 18, 16, 15, 14], "margin_by_year_pct": [30, 30, 31, 31, 32]},
-}
+
+# =================================================
+# MIGRATION: handle older session_state scenario format
+# =================================================
+def normalize_scenarios(scenarios_obj: dict) -> dict:
+    """
+    Supports these formats:
+    1) New: {Bear:{growth_start,growth_end,margin_start,margin_end}, ...}
+    2) Old: {Bear:{growth,margin}, ...}  (migrate -> start=end)
+    """
+    out = {}
+    for name in ["Bear", "Base", "Bull"]:
+        d = (scenarios_obj or {}).get(name, {})
+        if not isinstance(d, dict):
+            d = {}
+
+        # New format already?
+        if all(k in d for k in ["growth_start", "growth_end", "margin_start", "margin_end"]):
+            out[name] = {
+                "growth_start": float(d["growth_start"]),
+                "growth_end": float(d["growth_end"]),
+                "margin_start": float(d["margin_start"]),
+                "margin_end": float(d["margin_end"]),
+            }
+            continue
+
+        # Old format?
+        if "growth" in d or "margin" in d:
+            g = float(d.get("growth", DEFAULT_SCENARIOS[name]["growth_start"] / 100.0))  # old stored as decimal
+            m = float(d.get("margin", DEFAULT_SCENARIOS[name]["margin_start"] / 100.0))  # old stored as decimal
+            out[name] = {
+                "growth_start": g * 100.0,
+                "growth_end": g * 100.0,
+                "margin_start": m * 100.0,
+                "margin_end": m * 100.0,
+            }
+            continue
+
+        # Missing/unknown: default
+        out[name] = DEFAULT_SCENARIOS[name].copy()
+
+    return out
+
+# =================================================
+# Session state init (with migration)
+# =================================================
+if "scenarios" not in st.session_state:
+    st.session_state["scenarios"] = DEFAULT_SCENARIOS.copy()
+else:
+    st.session_state["scenarios"] = normalize_scenarios(st.session_state["scenarios"])
 
 if "globals" not in st.session_state:
     st.session_state["globals"] = DEFAULT_GLOBALS.copy()
-if "scenarios" not in st.session_state:
-    st.session_state["scenarios"] = DEFAULT_SCENARIOS.copy()
+else:
+    # Merge missing globals keys safely
+    merged = DEFAULT_GLOBALS.copy()
+    try:
+        merged.update({k: st.session_state["globals"][k] for k in st.session_state["globals"].keys()})
+    except Exception:
+        pass
+    st.session_state["globals"] = merged
+
 if "view" not in st.session_state:
     st.session_state["view"] = "Financial Model"
 if "terminal_method" not in st.session_state:
     st.session_state["terminal_method"] = "Gordon Growth"
 
 # =================================================
+# Upload historical Excel (optional): auto-detect base revenue
+# =================================================
+st.sidebar.header("📂 Historical File (Optional)")
+uploaded = st.sidebar.file_uploader("Upload Excel", type=["xlsx"])
+
+hist_df = None
+auto_base_revenue = None
+
+def detect_column(cols, keywords):
+    cols_lower = {c: str(c).strip().lower() for c in cols}
+    for c, cl in cols_lower.items():
+        if any(k in cl for k in keywords):
+            return c
+    return None
+
+if uploaded is not None:
+    try:
+        hist_df = pd.read_excel(uploaded)
+        if not hist_df.empty:
+            rev_col = detect_column(hist_df.columns, ["revenue", "sales", "turnover"])
+            if rev_col is not None:
+                s = pd.to_numeric(hist_df[rev_col], errors="coerce").dropna()
+                if not s.empty:
+                    auto_base_revenue = float(s.iloc[-1])
+    except Exception:
+        hist_df = None
+
+if hist_df is not None:
+    st.subheader("📄 Historical Data Preview")
+    st.data_editor(hist_df.head(50), hide_index=True, disabled=True, use_container_width=True)
+
+# =================================================
 # Sidebar: Global assumptions
 # =================================================
 st.sidebar.header("🔧 Global Assumptions")
-g = st.session_state["globals"]
 
+g = st.session_state["globals"]
 projection_years = st.sidebar.slider("Projection Years", 3, 10, int(g["projection_years"]))
 tax_rate_pct = st.sidebar.number_input("Tax Rate (%)", value=float(g["tax_rate_pct"]), step=0.5)
 wacc_pct = st.sidebar.number_input("WACC (%)", value=float(g["wacc_pct"]), step=0.5)
@@ -170,7 +259,8 @@ net_debt = st.sidebar.number_input("Net Debt", value=float(g["net_debt"]), step=
 cash = st.sidebar.number_input("Cash", value=float(g["cash"]), step=100.0)
 exit_multiple = st.sidebar.number_input("Exit Multiple (EV/EBITDA)", value=float(g["exit_multiple"]), step=0.5)
 
-base_revenue = st.sidebar.number_input("Base Revenue (Last Historical)", value=1120.0, step=100.0)
+default_base = auto_base_revenue if auto_base_revenue is not None else 1120.0
+base_revenue = st.sidebar.number_input("Base Revenue (Last Historical)", value=float(default_base), step=100.0)
 
 st.session_state["globals"] = {
     "projection_years": projection_years,
@@ -184,29 +274,6 @@ st.session_state["globals"] = {
     "cash": cash,
     "exit_multiple": exit_multiple,
 }
-
-# =================================================
-# Ensure scenarios arrays match projection_years
-# =================================================
-def ensure_len(arr, n, fill=None):
-    arr = list(arr) if isinstance(arr, (list, tuple)) else []
-    if len(arr) >= n:
-        return arr[:n]
-    if fill is None:
-        fill = arr[-1] if arr else 0.0
-    return arr + [fill] * (n - len(arr))
-
-for name in ["Bear", "Base", "Bull"]:
-    st.session_state["scenarios"][name]["growth_by_year_pct"] = ensure_len(
-        st.session_state["scenarios"][name].get("growth_by_year_pct", []),
-        projection_years,
-        fill=None
-    )
-    st.session_state["scenarios"][name]["margin_by_year_pct"] = ensure_len(
-        st.session_state["scenarios"][name].get("margin_by_year_pct", []),
-        projection_years,
-        fill=None
-    )
 
 # =================================================
 # Save/Load assumptions + Reset
@@ -233,7 +300,7 @@ if assump_upload is not None:
         loaded = json.load(assump_upload)
         if isinstance(loaded, dict) and "globals" in loaded and "scenarios" in loaded:
             st.session_state["globals"] = loaded["globals"]
-            st.session_state["scenarios"] = loaded["scenarios"]
+            st.session_state["scenarios"] = normalize_scenarios(loaded["scenarios"])
             st.session_state["terminal_method"] = loaded.get("terminal_method", "Gordon Growth")
             st.sidebar.success("Assumptions loaded.")
             st.rerun()
@@ -250,39 +317,26 @@ if st.sidebar.button("🔁 Reset to Defaults"):
     st.rerun()
 
 # =================================================
-# Sidebar: Edit one scenario year-by-year (Growth + Margin)
+# Edit one scenario at a time (start/end)
 # =================================================
-st.sidebar.header("📌 Scenario Inputs (Year-wise)")
+st.sidebar.header("📌 Scenario Inputs (Edit One)")
 
-edit_scn = st.sidebar.selectbox("Select Scenario to Edit", ["Bear", "Base", "Bull"], key="edit_scenario_select_yearwise")
+edit_scn = st.sidebar.selectbox("Select Scenario to Edit", ["Bear", "Base", "Bull"], key="edit_scenario_select")
+scn = st.session_state["scenarios"][edit_scn]  # safe now
 
-# Build editable table (Year, Growth%, Margin%)
-years_labels = [f"Year {i+1}" for i in range(projection_years)]
-edit_df = pd.DataFrame({
-    "Year": years_labels,
-    "Revenue Growth (%)": st.session_state["scenarios"][edit_scn]["growth_by_year_pct"],
-    "EBITDA Margin (%)": st.session_state["scenarios"][edit_scn]["margin_by_year_pct"],
-})
+growth_start = st.sidebar.number_input(f"{edit_scn}: Growth Start (%)", value=float(scn["growth_start"]), step=0.5)
+growth_end = st.sidebar.number_input(f"{edit_scn}: Growth End (%)", value=float(scn["growth_end"]), step=0.5)
+margin_start = st.sidebar.number_input(f"{edit_scn}: Margin Start (%)", value=float(scn["margin_start"]), step=0.5)
+margin_end = st.sidebar.number_input(f"{edit_scn}: Margin End (%)", value=float(scn["margin_end"]), step=0.5)
 
-st.sidebar.caption("Edit the table below. Values are in %.")
-edited = st.sidebar.data_editor(
-    edit_df,
-    hide_index=True,
-    disabled=["Year"],
-    use_container_width=True,
-    key=f"editor_{edit_scn}_{projection_years}"
-)
-
-if st.sidebar.button("✅ Save Year-wise Assumptions"):
-    try:
-        g_list = pd.to_numeric(edited["Revenue Growth (%)"], errors="coerce").fillna(0.0).tolist()
-        m_list = pd.to_numeric(edited["EBITDA Margin (%)"], errors="coerce").fillna(0.0).tolist()
-        st.session_state["scenarios"][edit_scn]["growth_by_year_pct"] = ensure_len(g_list, projection_years, fill=0.0)
-        st.session_state["scenarios"][edit_scn]["margin_by_year_pct"] = ensure_len(m_list, projection_years, fill=0.0)
-        st.sidebar.success(f"{edit_scn} year-wise assumptions saved.")
-        st.rerun()
-    except Exception:
-        st.sidebar.error("Could not save. Please check inputs.")
+if st.sidebar.button("✅ Save Scenario"):
+    st.session_state["scenarios"][edit_scn] = {
+        "growth_start": float(growth_start),
+        "growth_end": float(growth_end),
+        "margin_start": float(margin_start),
+        "margin_end": float(margin_end),
+    }
+    st.sidebar.success(f"{edit_scn} updated.")
 
 # =================================================
 # Top navigation buttons
@@ -298,7 +352,7 @@ with nav2:
 st.divider()
 
 # =================================================
-# Scenario selection to run + Terminal method
+# Scenario selection for running the model + terminal method
 # =================================================
 selected = st.radio("🎯 Select Scenario to Run", ["Bear", "Base", "Bull"], horizontal=True)
 
@@ -315,14 +369,19 @@ if terminal_method == "Gordon Growth" and (wacc_pct / 100.0) <= (terminal_growth
     st.error("❗ WACC must be greater than Terminal Growth for Gordon Growth terminal value. Please adjust assumptions.")
 
 # =================================================
-# Build model (year-wise series)
+# Model builder
 # =================================================
-def build_model(base_rev, growth_by_year_pct, margin_by_year_pct, globals_dict):
+def build_yearwise_series(start_pct, end_pct, n_years):
+    if n_years <= 1:
+        return np.array([float(start_pct)], dtype=float)
+    return np.linspace(float(start_pct), float(end_pct), n_years)
+
+def build_model_for_scenario(base_rev, scn_dict, globals_dict):
     n = int(globals_dict["projection_years"])
     years = [f"Year {i+1}" for i in range(n)]
 
-    growth_path = np.array(ensure_len(growth_by_year_pct, n, fill=0.0), dtype=float) / 100.0
-    margin_path = np.array(ensure_len(margin_by_year_pct, n, fill=0.0), dtype=float) / 100.0
+    growth_path = build_yearwise_series(scn_dict["growth_start"], scn_dict["growth_end"], n) / 100.0
+    margin_path = build_yearwise_series(scn_dict["margin_start"], scn_dict["margin_end"], n) / 100.0
 
     tax = globals_dict["tax_rate_pct"] / 100.0
     da_pct = globals_dict["da_pct_rev"] / 100.0
@@ -336,7 +395,7 @@ def build_model(base_rev, growth_by_year_pct, margin_by_year_pct, globals_dict):
 
     rows = []
     for i in range(n):
-        revenue *= (1 + growth_path[i])
+        revenue = revenue * (1 + growth_path[i])
         ebitda = revenue * margin_path[i]
         da = revenue * da_pct
         ebit = ebitda - da
@@ -390,37 +449,29 @@ def build_model(base_rev, growth_by_year_pct, margin_by_year_pct, globals_dict):
     }
 
 globals_dict = st.session_state["globals"]
-run_growth = st.session_state["scenarios"][selected]["growth_by_year_pct"]
-run_margin = st.session_state["scenarios"][selected]["margin_by_year_pct"]
-
-result = build_model(base_revenue, run_growth, run_margin, globals_dict)
+scenario_dict = st.session_state["scenarios"][selected]
+result = build_model_for_scenario(base_revenue, scenario_dict, globals_dict)
 df = result["df"]
 years = result["years"]
 
-all_results = {
-    name: build_model(
-        base_revenue,
-        st.session_state["scenarios"][name]["growth_by_year_pct"],
-        st.session_state["scenarios"][name]["margin_by_year_pct"],
-        globals_dict,
-    )
-    for name in ["Bear", "Base", "Bull"]
-}
+all_results = {name: build_model_for_scenario(base_revenue, st.session_state["scenarios"][name], globals_dict)
+               for name in ["Bear", "Base", "Bull"]}
 
 # =================================================
-# Scenario assumptions summary table
+# Scenario assumptions table (start/end)
 # =================================================
-st.subheader("📌 Scenario Assumptions (Year-wise Summary)")
-assump_summary = []
-for name in ["Bear", "Base", "Bull"]:
-    g_list = st.session_state["scenarios"][name]["growth_by_year_pct"]
-    m_list = st.session_state["scenarios"][name]["margin_by_year_pct"]
-    assump_summary.append({
+st.subheader("📌 Scenario Assumptions (Start → End)")
+assump_tbl = pd.DataFrame([
+    {
         "Scenario": name,
-        "Growth (Y1 → Yn)": f"{g_list[0]:.2f}% → {g_list[-1]:.2f}%",
-        "Margin (Y1 → Yn)": f"{m_list[0]:.2f}% → {m_list[-1]:.2f}%",
-    })
-show_table(pd.DataFrame(assump_summary))
+        "Growth Start": fmt_pct2(st.session_state["scenarios"][name]["growth_start"]),
+        "Growth End": fmt_pct2(st.session_state["scenarios"][name]["growth_end"]),
+        "Margin Start": fmt_pct2(st.session_state["scenarios"][name]["margin_start"]),
+        "Margin End": fmt_pct2(st.session_state["scenarios"][name]["margin_end"]),
+    }
+    for name in ["Bear", "Base", "Bull"]
+])
+show_table(assump_tbl)
 
 # =================================================
 # DASHBOARD VIEW
@@ -441,7 +492,14 @@ if st.session_state["view"] == "Dashboard":
     with k4: st.metric("Equity Value", fmt_currency(result["equity_value"]))
     with k5: st.metric("PV(TV) as % of EV", fmt_pct2(float(result["terminal_share"] * 100) if np.isfinite(result["terminal_share"]) else np.nan))
 
-    # Revenue vs Growth
+    st.markdown("### Scenario Comparison (EV / Equity)")
+    comp = pd.DataFrame({
+        "Scenario": ["Bear", "Base", "Bull"],
+        "Enterprise Value": [fmt_currency(all_results[s]["enterprise_value"]) for s in ["Bear", "Base", "Bull"]],
+        "Equity Value": [fmt_currency(all_results[s]["equity_value"]) for s in ["Bear", "Base", "Bull"]],
+    })
+    show_table(comp)
+
     st.markdown("### Revenue & Revenue Growth (%) — Selected Scenario")
     st.pyplot(dual_axis_line_chart(
         title="Revenue vs Revenue Growth",
@@ -455,7 +513,6 @@ if st.session_state["view"] == "Dashboard":
         right_is_pct=True,
     ))
 
-    # EBITDA vs Margin
     st.markdown("### EBITDA & EBITDA Margin (%) — Selected Scenario")
     st.pyplot(dual_axis_line_chart(
         title="EBITDA vs EBITDA Margin",
@@ -469,8 +526,7 @@ if st.session_state["view"] == "Dashboard":
         right_is_pct=True,
     ))
 
-    # NOPAT
-    st.markdown("### NOPAT")
+    st.markdown("### NOPAT (proxy for Profit After Tax)")
     fig, ax = plt.subplots()
     x_pos = np.arange(len(years))
     ax.plot(x_pos, df["NOPAT"].values, marker="o", label="NOPAT")
@@ -483,7 +539,6 @@ if st.session_state["view"] == "Dashboard":
     fig.tight_layout()
     st.pyplot(fig)
 
-    # FCF
     st.markdown("### Free Cash Flow (FCF)")
     fig, ax = plt.subplots()
     ax.plot(x_pos, df["FCF"].values, marker="o", label="FCF")
@@ -496,6 +551,22 @@ if st.session_state["view"] == "Dashboard":
     fig.tight_layout()
     st.pyplot(fig)
 
+    st.markdown("### EV Waterfall (PV explicit + PV TV = EV)")
+    pv_exp = result["pv_explicit"]
+    pv_tv = result["pv_terminal_value"]
+    ev = result["enterprise_value"]
+    fig, ax = plt.subplots()
+    labels = ["PV of Explicit FCFs", "PV of Terminal Value", "Enterprise Value"]
+    vals = [pv_exp, pv_tv, ev]
+    xw = np.arange(len(labels))
+    ax.bar(xw, vals)
+    ax.set_xticks(xw)
+    ax.set_xticklabels(labels)
+    ax.grid(False)
+    add_point_labels(ax, xw, np.array(vals), is_pct=False)
+    fig.tight_layout()
+    st.pyplot(fig)
+
     st.stop()
 
 # =================================================
@@ -503,7 +574,6 @@ if st.session_state["view"] == "Dashboard":
 # =================================================
 st.subheader("📑 Financial Model")
 
-# P&L
 pnl = pd.DataFrame({"Line Item": [
     "Revenue",
     "Revenue Growth (%)",
@@ -527,7 +597,6 @@ for y in years:
     ]
 show_table(pnl, "📑 Profit & Loss (Expanded)")
 
-# Cash Flow
 cf = pd.DataFrame({"Line Item": [
     "NOPAT",
     "Add: D&A",
@@ -545,7 +614,6 @@ for y in years:
     ]
 show_table(cf, "💵 Cash Flow (Detailed)")
 
-# DCF
 dcf = pd.DataFrame({"Line Item": ["FCF", "Discount Factor", "PV of FCF"]})
 for y in years:
     dcf[y] = [
@@ -555,7 +623,6 @@ for y in years:
     ]
 show_table(dcf, "💰 Discounted Cash Flow (Detailed)")
 
-# Valuation summary
 tv_rows = [
     ("Terminal Method", terminal_method),
     ("Final Year FCF", fmt_currency(df["FCF"].iloc[-1])),
@@ -585,11 +652,8 @@ def to_excel_bytes():
 
         sc_rows = []
         for name in ["Bear", "Base", "Bull"]:
-            d = {
-                "Scenario": name,
-                "Growth By Year (%)": ", ".join([f"{v:.2f}" for v in st.session_state["scenarios"][name]["growth_by_year_pct"]]),
-                "Margin By Year (%)": ", ".join([f"{v:.2f}" for v in st.session_state["scenarios"][name]["margin_by_year_pct"]]),
-            }
+            d = st.session_state["scenarios"][name].copy()
+            d["Scenario"] = name
             sc_rows.append(d)
         pd.DataFrame(sc_rows).to_excel(writer, sheet_name="Assumptions_Scenarios", index=False)
 
@@ -618,8 +682,8 @@ st.download_button(
 with st.expander("🧠 Quick model explanation"):
     st.markdown(
         """
-**Revenue projection:** Uses *year-wise* revenue growth rates from the selected scenario.  
-**EBITDA:** Revenue × *year-wise* EBITDA margin.  
+**Revenue projection:** Year-wise growth path (start → end).  
+**EBITDA:** Revenue × year-wise EBITDA margin (start → end).  
 **EBIT:** EBITDA − D&A (D&A = % of revenue).  
 **NOPAT:** EBIT × (1 − tax rate).  
 **FCF:** NOPAT + D&A − Capex − ΔNWC  
@@ -627,5 +691,3 @@ with st.expander("🧠 Quick model explanation"):
 **Equity Value:** EV − Net Debt + Cash  
 """
     )
-Share this email in Google Chat
-Discuss in real time with an individual, group, space, or even someone outside 
