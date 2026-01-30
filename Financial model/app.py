@@ -6,9 +6,9 @@ import matplotlib.pyplot as plt
 # -------------------------------------------------
 # Page Setup
 # -------------------------------------------------
-st.set_page_config(page_title="Financial Model – Scenario Valuation", layout="wide")
-st.title("📊 Financial Model – Scenario-Based Valuation")
-st.caption("Vertical Financial Statements | Scenario Toggle | DCF")
+st.set_page_config(page_title="Financial Model – Explained Statements", layout="wide")
+st.title("📊 Financial Model – Explained Financial Statements")
+st.caption("Scenario-based | Vertical Statements | Fully Explained Calculations")
 
 # -------------------------------------------------
 # Sidebar – Global Assumptions
@@ -42,7 +42,11 @@ scenarios = {
 st.subheader("📌 Scenario Assumptions")
 
 assumptions_df = pd.DataFrame(scenarios).T
-st.dataframe(assumptions_df.style.format("{:.1%}"))
+st.dataframe(
+    assumptions_df.style
+    .format("{:.1%}")
+    .set_properties(**{"text-align": "center"})
+)
 
 # -------------------------------------------------
 # Scenario Toggle
@@ -54,7 +58,7 @@ selected_scenario = st.radio(
 )
 
 growth = scenarios[selected_scenario]["Revenue Growth"]
-margin = scenarios[selected_scenario]["EBITDA Margin"]
+ebitda_margin = scenarios[selected_scenario]["EBITDA Margin"]
 
 years = [f"Year {i+1}" for i in range(projection_years)]
 
@@ -62,7 +66,7 @@ years = [f"Year {i+1}" for i in range(projection_years)]
 # Financial Model
 # -------------------------------------------------
 revenue = base_revenue
-data = {
+model = {
     "Revenue": [],
     "EBITDA": [],
     "Tax": [],
@@ -72,18 +76,18 @@ data = {
 
 for _ in years:
     revenue *= (1 + growth)
-    ebitda = revenue * margin
+    ebitda = revenue * ebitda_margin
     tax = ebitda * tax_rate
     pat = ebitda - tax
     fcf = pat * 0.9
 
-    data["Revenue"].append(revenue)
-    data["EBITDA"].append(ebitda)
-    data["Tax"].append(tax)
-    data["PAT"].append(pat)
-    data["FCF"].append(fcf)
+    model["Revenue"].append(revenue)
+    model["EBITDA"].append(ebitda)
+    model["Tax"].append(tax)
+    model["PAT"].append(pat)
+    model["FCF"].append(fcf)
 
-model_df = pd.DataFrame(data, index=years)
+model_df = pd.DataFrame(model, index=years)
 
 # -------------------------------------------------
 # Trend Chart
@@ -94,40 +98,48 @@ fig, ax = plt.subplots()
 ax.plot(model_df.index, model_df["Revenue"], marker="o", label="Revenue")
 ax.plot(model_df.index, model_df["EBITDA"], marker="o", label="EBITDA")
 ax.plot(model_df.index, model_df["PAT"], marker="o", label="PAT")
-ax.set_ylabel("Amount")
 ax.legend()
 ax.grid(True)
 st.pyplot(fig)
 
 # =================================================
-# TABLE 1: PROFIT & LOSS (VERTICAL)
+# TABLE 1: PROFIT & LOSS (EXPLAINED)
 # =================================================
-st.subheader("📑 Profit & Loss Statement (Vertical)")
+st.subheader("📑 Profit & Loss Statement (Explained)")
 
 pnl_vertical = pd.DataFrame({
     "Revenue": model_df["Revenue"],
+    "EBITDA Margin (%)": ebitda_margin * 100,
     "EBITDA": model_df["EBITDA"],
+    "Tax Rate (%)": tax_rate * 100,
     "Tax": model_df["Tax"],
-    "Profit After Tax (PAT)": model_df["PAT"]
+    "Profit After Tax (PAT)": model_df["PAT"],
 }).T
 
 st.dataframe(
-    pnl_vertical.style.format("{:,.0f}")
+    pnl_vertical.style
+    .format("{:,.0f}", subset=["Revenue", "EBITDA", "Tax", "Profit After Tax (PAT)"])
+    .format("{:.1f}%", subset=["EBITDA Margin (%)", "Tax Rate (%)"])
+    .set_properties(**{"text-align": "center"})
 )
 
 # =================================================
-# TABLE 2: CASH FLOW STATEMENT (VERTICAL)
+# TABLE 2: CASH FLOW STATEMENT (EXPLAINED)
 # =================================================
-st.subheader("💵 Cash Flow Statement (Vertical)")
+st.subheader("💵 Cash Flow Statement (Explained)")
 
 cashflow_vertical = pd.DataFrame({
     "Profit After Tax": model_df["PAT"],
-    "Less: Reinvestment (10%)": -0.10 * model_df["PAT"],
+    "Reinvestment Rate (%)": 10.0,
+    "Less: Reinvestment": -0.10 * model_df["PAT"],
     "Free Cash Flow": model_df["FCF"]
 }).T
 
 st.dataframe(
-    cashflow_vertical.style.format("{:,.0f}")
+    cashflow_vertical.style
+    .format("{:,.0f}", subset=["Profit After Tax", "Less: Reinvestment", "Free Cash Flow"])
+    .format("{:.1f}%", subset=["Reinvestment Rate (%)"])
+    .set_properties(**{"text-align": "center"})
 )
 
 # =================================================
@@ -149,13 +161,15 @@ pv_terminal_value = terminal_value * discount_factors[-1]
 enterprise_value = pv_fcf.sum() + pv_terminal_value
 
 # =================================================
-# TABLE 3: VALUATION SUMMARY (VERTICAL)
+# TABLE 3: VALUATION SUMMARY (EXPLAINED)
 # =================================================
-st.subheader("💰 Valuation Summary (Vertical)")
+st.subheader("💰 Valuation Summary (Explained)")
 
 valuation_vertical = pd.DataFrame(
     {
         "Amount": [
+            discount_rate * 100,
+            terminal_growth * 100,
             pv_fcf.sum(),
             terminal_value,
             pv_terminal_value,
@@ -163,6 +177,8 @@ valuation_vertical = pd.DataFrame(
         ]
     },
     index=[
+        "Discount Rate (WACC %)",
+        "Terminal Growth Rate (%)",
         "PV of Free Cash Flows",
         "Terminal Value",
         "PV of Terminal Value",
@@ -171,21 +187,31 @@ valuation_vertical = pd.DataFrame(
 )
 
 st.dataframe(
-    valuation_vertical.style.format("{:,.0f}")
+    valuation_vertical.style
+    .format("{:,.0f}", subset=["Amount"])
+    .format("{:.1f}%", subset=["Amount"], na_rep="")
+    .set_properties(**{"text-align": "center"})
 )
 
 st.metric("Enterprise Value", f"{enterprise_value:,.0f}")
 
 # -------------------------------------------------
-# Explanation Block
+# Explanation Panel
 # -------------------------------------------------
-with st.expander("🧠 How EBITDA of 280 is calculated from Revenue 1120"):
-    st.write("""
-**EBITDA = Revenue × EBITDA Margin**
+with st.expander("🧠 How each statement is calculated"):
+    st.markdown("""
+**Profit & Loss**
+- Revenue grows annually using the selected growth rate
+- EBITDA = Revenue × EBITDA Margin
+- Tax = EBITDA × Tax Rate
+- PAT = EBITDA − Tax
 
-Example (Base Case):
-- Revenue = 1,120
-- EBITDA Margin = 25%
+**Cash Flow**
+- Reinvestment assumed at 10% of PAT
+- Free Cash Flow = PAT − Reinvestment
 
-**EBITDA = 1,120 × 25% = 280**
+**Valuation**
+- FCFs discounted using WACC
+- Terminal Value calculated using Gordon Growth Model
+- Enterprise Value = PV of FCFs + PV of Terminal Value
 """)
