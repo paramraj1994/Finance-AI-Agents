@@ -8,15 +8,16 @@ import matplotlib.pyplot as plt
 # =================================================
 st.set_page_config(page_title="Financial Model – Investor View", layout="wide")
 st.title("📊 Financial Model – Investor-Ready Valuation Model")
-st.caption("Clean tables • no index column • proper formatting")
+st.caption("Clean tables • no index column • proper formatting • detailed DCF")
 
 # =================================================
 # CSS – CENTER ALIGN ALL TABLE CELLS
 # =================================================
 st.markdown("""
 <style>
-div[data-testid="stDataFrame"] table th,
-div[data-testid="stDataFrame"] table td {
+/* Center align cells/headers in data editor tables */
+div[data-testid="stDataEditor"] table th,
+div[data-testid="stDataEditor"] table td {
     text-align: center !important;
     vertical-align: middle !important;
     white-space: nowrap;
@@ -30,20 +31,31 @@ div[data-testid="stDataFrame"] table td {
 def fmt_currency(x):
     try:
         return f"{float(x):,.0f}"
-    except:
+    except Exception:
         return ""
 
 def fmt_pct_2(x):
     try:
         return f"{float(x):.2f}%"
-    except:
+    except Exception:
         return ""
 
 def fmt_float_2(x):
     try:
         return f"{float(x):.2f}"
-    except:
+    except Exception:
         return ""
+
+def show_table(df: pd.DataFrame, title: str | None = None):
+    """Display tables without the 0,1,2 index column."""
+    if title:
+        st.subheader(title)
+    st.data_editor(
+        df,
+        hide_index=True,
+        disabled=True,
+        use_container_width=True
+    )
 
 # =================================================
 # SIDEBAR ASSUMPTIONS
@@ -60,7 +72,7 @@ discount_rate = st.sidebar.slider("WACC", 0.08, 0.18, 0.12, 0.01)
 terminal_growth = st.sidebar.slider("Terminal Growth Rate", 0.02, 0.06, 0.04, 0.005)
 
 # =================================================
-# SCENARIOS
+# SCENARIOS + TOGGLE
 # =================================================
 scenarios = {
     "Bear": {"growth": 0.07, "margin": 0.20},
@@ -69,20 +81,23 @@ scenarios = {
 }
 
 st.subheader("📌 Scenario Assumptions")
-assump = pd.DataFrame(scenarios).T.reset_index(drop=True)
-assump["Revenue Growth"] = assump["growth"].apply(lambda x: fmt_pct_2(x * 100))
-assump["EBITDA Margin"] = assump["margin"].apply(lambda x: fmt_pct_2(x * 100))
-assump = assump[["Revenue Growth", "EBITDA Margin"]]
-st.dataframe(assump, use_container_width=True)
+assump = pd.DataFrame(
+    {
+        "Scenario": list(scenarios.keys()),
+        "Revenue Growth": [fmt_pct_2(v["growth"] * 100) for v in scenarios.values()],
+        "EBITDA Margin": [fmt_pct_2(v["margin"] * 100) for v in scenarios.values()],
+    }
+)
+show_table(assump)
 
-selected = st.radio("Select Scenario", scenarios.keys(), horizontal=True)
+selected = st.radio("🎯 Select Scenario", list(scenarios.keys()), horizontal=True)
 growth = scenarios[selected]["growth"]
 margin = scenarios[selected]["margin"]
 
 years = [f"Year {i+1}" for i in range(projection_years)]
 
 # =================================================
-# BUILD MODEL
+# BUILD MODEL (numeric)
 # =================================================
 revenue = base_revenue
 rows = []
@@ -92,68 +107,73 @@ for _ in years:
     ebitda = revenue * margin
     tax = ebitda * tax_rate
     pat = ebitda - tax
-    fcf = pat * (1 - reinvestment_rate)
+    fcf = pat * (1 - reinvestment_rate)  # proxy = PAT minus reinvestment
     rows.append([revenue, ebitda, tax, pat, fcf])
 
 df = pd.DataFrame(rows, columns=["Revenue", "EBITDA", "Tax", "PAT", "FCF"], index=years)
 
 # =================================================
-# PROFIT & LOSS STATEMENT
+# OPTIONAL: TREND CHART
 # =================================================
-st.subheader("📑 Profit & Loss Statement")
+st.subheader(f"📈 {selected} Case – Financial Trends")
+fig, ax = plt.subplots()
+ax.plot(df.index, df["Revenue"], marker="o", label="Revenue")
+ax.plot(df.index, df["EBITDA"], marker="o", label="EBITDA")
+ax.plot(df.index, df["PAT"], marker="o", label="PAT")
+ax.legend()
+ax.grid(True)
+ax.set_ylabel("Amount")
+st.pyplot(fig)
 
-pnl = pd.DataFrame({
-    "Line Item": [
-        "Revenue",
-        "EBITDA Margin (%)",
-        "EBITDA",
-        "Tax Rate (%)",
-        "Tax",
-        "Profit After Tax (PAT)"
-    ]
-})
+# =================================================
+# PROFIT & LOSS STATEMENT (readable headings)
+# =================================================
+pnl = pd.DataFrame({"Line Item": [
+    "Revenue",
+    "Revenue Growth (%)",
+    "EBITDA Margin (%)",
+    "EBITDA",
+    "Tax Rate (%)",
+    "Tax",
+    "Profit After Tax (PAT)"
+]})
 
 for y in years:
     pnl[y] = [
         fmt_currency(df.loc[y, "Revenue"]),
+        fmt_pct_2(growth * 100),
         fmt_pct_2(margin * 100),
         fmt_currency(df.loc[y, "EBITDA"]),
         fmt_pct_2(tax_rate * 100),
         fmt_currency(df.loc[y, "Tax"]),
-        fmt_currency(df.loc[y, "PAT"])
+        fmt_currency(df.loc[y, "PAT"]),
     ]
 
-st.dataframe(pnl.reset_index(drop=True), use_container_width=True)
+show_table(pnl, "📑 Profit & Loss Statement")
 
 # =================================================
-# CASH FLOW STATEMENT
+# CASH FLOW STATEMENT (explained)
 # =================================================
-st.subheader("💵 Cash Flow Statement")
-
-cf = pd.DataFrame({
-    "Line Item": [
-        "Profit After Tax (PAT)",
-        "Reinvestment Rate (%)",
-        "Less: Reinvestment",
-        "Free Cash Flow (FCF)"
-    ]
-})
+cf = pd.DataFrame({"Line Item": [
+    "Profit After Tax (PAT)",
+    "Reinvestment Rate (% of PAT)",
+    "Less: Reinvestment",
+    "Free Cash Flow (FCF)"
+]})
 
 for y in years:
     cf[y] = [
         fmt_currency(df.loc[y, "PAT"]),
         fmt_pct_2(reinvestment_rate * 100),
         fmt_currency(-reinvestment_rate * df.loc[y, "PAT"]),
-        fmt_currency(df.loc[y, "FCF"])
+        fmt_currency(df.loc[y, "FCF"]),
     ]
 
-st.dataframe(cf.reset_index(drop=True), use_container_width=True)
+show_table(cf, "💵 Cash Flow Statement")
 
 # =================================================
-# DISCOUNTED CASH FLOW
+# DCF – DETAILED (per-year discounting)
 # =================================================
-st.subheader("💰 Discounted Cash Flow")
-
 discount_factors = []
 pv_fcf = []
 
@@ -162,69 +182,100 @@ for i, y in enumerate(years):
     discount_factors.append(dfactor)
     pv_fcf.append(df.loc[y, "FCF"] * dfactor)
 
-dcf = pd.DataFrame({
-    "Line Item": [
-        "Free Cash Flow",
-        "Discount Factor",
-        "Present Value of FCF"
-    ]
-})
+dcf_detail = pd.DataFrame({"Line Item": [
+    "Free Cash Flow (FCF)",
+    "Discount Factor",
+    "PV of FCF"
+]})
 
 for i, y in enumerate(years):
-    dcf[y] = [
+    dcf_detail[y] = [
         fmt_currency(df.loc[y, "FCF"]),
         fmt_float_2(discount_factors[i]),
-        fmt_currency(pv_fcf[i])
+        fmt_currency(pv_fcf[i]),
     ]
 
-st.dataframe(dcf.reset_index(drop=True), use_container_width=True)
+show_table(dcf_detail, "💰 Discounted Cash Flow (Detailed)")
 
 # =================================================
-# TERMINAL VALUE
+# TERMINAL VALUE – FULL BREAKDOWN
 # =================================================
-st.subheader("📘 Terminal Value Calculation")
-
 last_fcf = df["FCF"].iloc[-1]
 terminal_value = (last_fcf * (1 + terminal_growth)) / (discount_rate - terminal_growth)
 pv_terminal = terminal_value * discount_factors[-1]
 
 tv = pd.DataFrame({
     "Line Item": [
-        "Final Year Free Cash Flow",
-        "Terminal Growth Rate (%)",
-        "Discount Rate (WACC %)",
-        "Terminal Value",
-        "PV of Terminal Value"
+        "Final Year FCF",
+        "Terminal Growth Rate (g) (%)",
+        "Discount Rate (WACC) (%)",
+        "Terminal Value = FCF×(1+g)/(WACC−g)",
+        "PV of Terminal Value = TV×DF_last"
     ],
     "Amount": [
         fmt_currency(last_fcf),
         fmt_pct_2(terminal_growth * 100),
         fmt_pct_2(discount_rate * 100),
         fmt_currency(terminal_value),
-        fmt_currency(pv_terminal)
+        fmt_currency(pv_terminal),
     ]
 })
 
-st.dataframe(tv.reset_index(drop=True), use_container_width=True)
+show_table(tv, "📘 Terminal Value Calculation (Detailed)")
 
 # =================================================
-# ENTERPRISE VALUE
+# ENTERPRISE VALUE SUMMARY
 # =================================================
 enterprise_value = sum(pv_fcf) + pv_terminal
 
 ev = pd.DataFrame({
     "Line Item": [
-        "PV of Explicit Cash Flows",
+        "PV of Explicit FCFs (Sum of PV of FCF)",
         "PV of Terminal Value",
         "Enterprise Value"
     ],
     "Amount": [
         fmt_currency(sum(pv_fcf)),
         fmt_currency(pv_terminal),
-        fmt_currency(enterprise_value)
+        fmt_currency(enterprise_value),
     ]
 })
 
-st.subheader("🏁 Enterprise Value Summary")
-st.dataframe(ev.reset_index(drop=True), use_container_width=True)
+show_table(ev, "🏁 Enterprise Value Summary")
 st.metric("Enterprise Value", fmt_currency(enterprise_value))
+
+# =================================================
+# DOWNLOAD (numeric model)
+# =================================================
+st.subheader("⬇️ Download Selected Scenario (Numeric Model)")
+
+download_df = df.copy()
+download_df["Discount Factor"] = discount_factors
+download_df["PV of FCF"] = pv_fcf
+
+csv = download_df.reset_index().rename(columns={"index": "Year"}).to_csv(index=False)
+st.download_button(
+    f"Download {selected} Case CSV",
+    csv,
+    f"{selected}_Financial_Model.csv",
+    "text/csv"
+)
+
+with st.expander("🧠 Explanation (End-to-End)"):
+    st.markdown(f"""
+### Profit & Loss
+- Revenue grows annually using scenario growth (**{growth:.0%}**)
+- EBITDA = Revenue × EBITDA Margin (**{margin:.0%}**)
+- Tax = EBITDA × Tax Rate (**{tax_rate:.0%}**)
+- PAT = EBITDA − Tax
+
+### Cash Flow
+- Reinvestment = PAT × Reinvestment Rate (**{reinvestment_rate:.0%}**)
+- FCF = PAT − Reinvestment
+
+### DCF Valuation
+- Discount Factorₜ = 1/(1+WACC)ᵗ where WACC = **{discount_rate:.0%}**
+- PV of FCF = FCFₜ × Discount Factorₜ
+- Terminal Value = FCF_last × (1+g) / (WACC − g) where g = **{terminal_growth:.0%}**
+- Enterprise Value = Sum(PV of FCF) + PV of Terminal Value
+""")
