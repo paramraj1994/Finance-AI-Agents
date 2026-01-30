@@ -1,143 +1,158 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import matplotlib.pyplot as plt
+import plotly.graph_objects as go
 
 # -------------------------------------------------
-# Page Configuration
+# Page Setup
 # -------------------------------------------------
-st.set_page_config(
-    page_title="Financial Model – Profit & Loss",
-    layout="wide"
-)
-
-st.title("📊 Financial Model – Profit & Loss Statement")
-st.caption("Upload historical financials and generate projected P&L dynamically")
+st.set_page_config(page_title="Financial Model – Investor Dashboard", layout="wide")
+st.title("📊 Financial Model – Investor Dashboard")
+st.caption("Scenario-based P&L, Sensitivity, Cash Flow & Valuation")
 
 # -------------------------------------------------
-# Upload Excel
+# Sidebar – Global Assumptions
 # -------------------------------------------------
-uploaded_file = st.file_uploader(
-    "📂 Upload your historical financial Excel file",
-    type=["xlsx"]
-)
+st.sidebar.header("🔧 Core Assumptions")
 
-if uploaded_file is None:
-    st.info("Please upload an Excel file to continue.")
-    st.stop()
+projection_years = st.sidebar.slider("Projection Years", 3, 10, 5)
+tax_rate = st.sidebar.slider("Tax Rate (%)", 0.15, 0.40, 0.25, 0.01)
+discount_rate = st.sidebar.slider("Discount Rate (WACC)", 0.08, 0.18, 0.12, 0.01)
+terminal_growth = st.sidebar.slider("Terminal Growth Rate", 0.02, 0.06, 0.04, 0.005)
 
-df = pd.read_excel(uploaded_file)
-
-st.subheader("📄 Uploaded Historical Data (Preview)")
-st.dataframe(df)
+base_revenue = st.sidebar.number_input("Last Historical Revenue", 100.0, value=1000.0)
 
 # -------------------------------------------------
-# Sidebar Assumptions
+# Scenario Definitions
 # -------------------------------------------------
-st.sidebar.header("🔧 Projection Assumptions")
-
-revenue_growth = st.sidebar.slider(
-    "Revenue Growth (%)", 0.0, 0.5, 0.12, 0.01
-)
-
-ebitda_margin = st.sidebar.slider(
-    "EBITDA Margin (%)", 0.05, 0.6, 0.25, 0.01
-)
-
-tax_rate = st.sidebar.slider(
-    "Tax Rate (%)", 0.1, 0.4, 0.25, 0.01
-)
-
-projection_years = st.sidebar.number_input(
-    "Number of Projection Years",
-    min_value=1,
-    max_value=10,
-    value=3
-)
-
-# -------------------------------------------------
-# Identify Historical Revenue
-# -------------------------------------------------
-st.subheader("📌 Base Inputs")
-
-base_revenue = st.number_input(
-    "Last Historical Year Revenue",
-    min_value=0.0,
-    value=1000.0,
-    step=100.0
-)
-
-last_year = st.number_input(
-    "Last Historical Year",
-    min_value=2000,
-    max_value=2100,
-    value=2025
-)
-
-# -------------------------------------------------
-# Build P&L Model
-# -------------------------------------------------
-years = [str(last_year + i) for i in range(1, projection_years + 1)]
-
-pnl_data = {
-    "Revenue": [],
-    "EBITDA": [],
-    "Tax": [],
-    "Profit After Tax": []
+scenarios = {
+    "Bear": {"growth": 0.07, "margin": 0.20},
+    "Base": {"growth": 0.12, "margin": 0.25},
+    "Bull": {"growth": 0.18, "margin": 0.30},
 }
 
-revenue = base_revenue
-
-for _ in years:
-    revenue = revenue * (1 + revenue_growth)
-    ebitda = revenue * ebitda_margin
-    tax = ebitda * tax_rate
-    pat = ebitda - tax
-
-    pnl_data["Revenue"].append(revenue)
-    pnl_data["EBITDA"].append(ebitda)
-    pnl_data["Tax"].append(tax)
-    pnl_data["Profit After Tax"].append(pat)
-
-pnl_df = pd.DataFrame(pnl_data, index=years).T
+years = [f"Y{i+1}" for i in range(projection_years)]
 
 # -------------------------------------------------
-# Display P&L Statement
+# Model Function
 # -------------------------------------------------
-st.subheader("📑 Projected Profit & Loss Statement")
+def build_model(growth, margin):
+    revenue = base_revenue
+    rows = []
 
-st.dataframe(
-    pnl_df.style
-    .format("{:,.0f}")
-    .set_properties(**{"text-align": "right"})
-)
+    for _ in years:
+        revenue *= (1 + growth)
+        ebitda = revenue * margin
+        tax = ebitda * tax_rate
+        pat = ebitda - tax
+        fcf = pat * 0.9  # simple proxy
+
+        rows.append([revenue, ebitda, tax, pat, fcf])
+
+    df = pd.DataFrame(
+        rows,
+        columns=["Revenue", "EBITDA", "Tax", "PAT", "FCF"],
+        index=years
+    )
+    return df
 
 # -------------------------------------------------
-# Charts Section
+# Build Scenario Models
 # -------------------------------------------------
-st.subheader("📈 Financial Trend Analysis")
+models = {name: build_model(**params) for name, params in scenarios.items()}
+
+# -------------------------------------------------
+# Scenario Comparison – Interactive Chart
+# -------------------------------------------------
+st.subheader("📈 Scenario Comparison – Revenue & PAT")
+
+fig = go.Figure()
+for name, df in models.items():
+    fig.add_trace(go.Scatter(x=df.index, y=df["Revenue"], mode="lines+markers", name=f"{name} Revenue"))
+    fig.add_trace(go.Scatter(x=df.index, y=df["PAT"], mode="lines+markers", name=f"{name} PAT"))
+
+fig.update_layout(title="Scenario Comparison", xaxis_title="Year", yaxis_title="Amount")
+st.plotly_chart(fig, use_container_width=True)
+
+# -------------------------------------------------
+# Scenario Tables
+# -------------------------------------------------
+st.subheader("📑 Scenario Financials")
+
+tabs = st.tabs(models.keys())
+for tab, (name, df) in zip(tabs, models.items()):
+    with tab:
+        st.dataframe(df.style.format("{:,.0f}"))
+
+# -------------------------------------------------
+# Sensitivity Analysis – Heatmap
+# -------------------------------------------------
+st.subheader("🔥 Sensitivity Analysis – PAT")
+
+growth_range = np.arange(0.08, 0.20, 0.02)
+margin_range = np.arange(0.20, 0.35, 0.03)
+
+heatmap = pd.DataFrame(index=[f"{m:.0%}" for m in margin_range],
+                       columns=[f"{g:.0%}" for g in growth_range])
+
+for g in growth_range:
+    for m in margin_range:
+        df = build_model(g, m)
+        heatmap.loc[f"{m:.0%}", f"{g:.0%}"] = df["PAT"].sum()
+
+heatmap = heatmap.astype(float)
 
 fig, ax = plt.subplots()
-ax.plot(pnl_df.columns, pnl_df.loc["Revenue"], marker="o", label="Revenue")
-ax.plot(pnl_df.columns, pnl_df.loc["EBITDA"], marker="o", label="EBITDA")
-ax.plot(pnl_df.columns, pnl_df.loc["Profit After Tax"], marker="o", label="PAT")
-
-ax.set_xlabel("Year")
-ax.set_ylabel("Amount")
-ax.legend()
-ax.grid(True)
-
+im = ax.imshow(heatmap.values)
+ax.set_xticks(range(len(heatmap.columns)))
+ax.set_yticks(range(len(heatmap.index)))
+ax.set_xticklabels(heatmap.columns)
+ax.set_yticklabels(heatmap.index)
+ax.set_title("Cumulative PAT Sensitivity")
+plt.colorbar(im)
 st.pyplot(fig)
 
 # -------------------------------------------------
-# Download P&L
+# DCF Valuation
 # -------------------------------------------------
-st.subheader("⬇️ Download P&L Statement")
+st.subheader("💰 Valuation – DCF (Base Case)")
 
-csv = pnl_df.reset_index().rename(columns={"index": "Line Item"}).to_csv(index=False)
+base_df = models["Base"]
+
+discount_factors = [(1 / (1 + discount_rate) ** (i + 1)) for i in range(projection_years)]
+base_df["Discount Factor"] = discount_factors
+base_df["PV of FCF"] = base_df["FCF"] * base_df["Discount Factor"]
+
+terminal_value = (
+    base_df["FCF"].iloc[-1] * (1 + terminal_growth)
+    / (discount_rate - terminal_growth)
+)
+
+pv_terminal = terminal_value * discount_factors[-1]
+enterprise_value = base_df["PV of FCF"].sum() + pv_terminal
+
+st.metric("Enterprise Value", f"{enterprise_value:,.0f}")
+
+# -------------------------------------------------
+# Valuation Bridge Chart
+# -------------------------------------------------
+fig = go.Figure()
+fig.add_bar(x=base_df.index, y=base_df["PV of FCF"], name="PV of FCF")
+fig.add_bar(x=["Terminal"], y=[pv_terminal], name="PV of Terminal Value")
+fig.update_layout(title="DCF Value Bridge")
+st.plotly_chart(fig, use_container_width=True)
+
+# -------------------------------------------------
+# Download Model
+# -------------------------------------------------
+st.subheader("⬇️ Download Base Case Model")
+
+csv = base_df.reset_index().rename(columns={"index": "Year"}).to_csv(index=False)
 
 st.download_button(
-    label="Download P&L as CSV",
-    data=csv,
-    file_name="Profit_and_Loss_Statement.csv",
-    mime="text/csv"
+    "Download Base Case CSV",
+    csv,
+    "Base_Case_Financial_Model.csv",
+    "text/csv"
 )
