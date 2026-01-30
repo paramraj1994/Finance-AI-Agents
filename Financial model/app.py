@@ -6,12 +6,12 @@ import matplotlib.pyplot as plt
 # -------------------------------------------------
 # Page Setup
 # -------------------------------------------------
-st.set_page_config(page_title="Financial Model – Scenario Dashboard", layout="wide")
+st.set_page_config(page_title="Financial Model – Scenario Valuation", layout="wide")
 st.title("📊 Financial Model – Scenario-Based Valuation")
-st.caption("Toggle between Bear, Base and Bull cases")
+st.caption("Profit & Loss • Cash Flow • Valuation Summary")
 
 # -------------------------------------------------
-# File Upload
+# File Upload (Optional)
 # -------------------------------------------------
 uploaded_file = st.file_uploader(
     "📂 Upload Historical Financials (Excel – optional)",
@@ -23,7 +23,7 @@ if uploaded_file is not None:
     st.subheader("📄 Uploaded Data Preview")
     st.dataframe(hist_df)
 else:
-    st.info("No file uploaded. Projections will use manual inputs.")
+    st.info("No file uploaded. Model will use manual assumptions.")
 
 # -------------------------------------------------
 # Sidebar – Global Assumptions
@@ -57,9 +57,7 @@ scenarios = {
 st.subheader("📌 Scenario Assumptions")
 
 assumptions_df = pd.DataFrame(scenarios).T
-st.dataframe(
-    assumptions_df.style.format("{:.1%}")
-)
+st.dataframe(assumptions_df.style.format("{:.1%}"))
 
 # -------------------------------------------------
 # Scenario Toggle
@@ -87,7 +85,7 @@ def build_model(growth, margin):
         ebitda = revenue * margin
         tax = ebitda * tax_rate
         pat = ebitda - tax
-        fcf = pat * 0.9  # simple proxy
+        fcf = pat * 0.9  # simple, explainable proxy
 
         rows.append([revenue, ebitda, tax, pat, fcf])
 
@@ -100,34 +98,58 @@ def build_model(growth, margin):
 model_df = build_model(growth, margin)
 
 # -------------------------------------------------
-# Selected Scenario Overview
+# Trend Chart
 # -------------------------------------------------
-st.subheader(f"📈 {selected_scenario} Case – Financial Overview")
+st.subheader(f"📈 {selected_scenario} Case – Financial Trends")
 
 fig, ax = plt.subplots()
 ax.plot(model_df.index, model_df["Revenue"], marker="o", label="Revenue")
 ax.plot(model_df.index, model_df["EBITDA"], marker="o", label="EBITDA")
 ax.plot(model_df.index, model_df["PAT"], marker="o", label="PAT")
-
 ax.set_ylabel("Amount")
 ax.legend()
 ax.grid(True)
 st.pyplot(fig)
 
-# -------------------------------------------------
-# Financial Table
-# -------------------------------------------------
-st.subheader("📑 Projected P&L")
+# =================================================
+# TABLE 1: PROFIT & LOSS STATEMENT
+# =================================================
+st.subheader("📑 Profit & Loss Statement")
+
+pnl_table = model_df[[
+    "Revenue",
+    "EBITDA",
+    "Tax",
+    "PAT"
+]]
 
 st.dataframe(
-    model_df.style.format("{:,.0f}")
+    pnl_table.style.format({
+        "Revenue": "{:,.0f}",
+        "EBITDA": "{:,.0f}",
+        "Tax": "{:,.0f}",
+        "PAT": "{:,.0f}",
+    })
 )
 
-# -------------------------------------------------
-# DCF – Revenue to Enterprise Value Bridge
-# -------------------------------------------------
-st.subheader("🧮 Revenue → EBITDA → PAT → DCF Bridge")
+# =================================================
+# TABLE 2: CASH FLOW STATEMENT
+# =================================================
+st.subheader("💵 Cash Flow Statement")
 
+cashflow_df = pd.DataFrame(index=model_df.index)
+
+cashflow_df["Profit After Tax"] = model_df["PAT"]
+cashflow_df["Less: Reinvestment (10%)"] = -0.10 * model_df["PAT"]
+cashflow_df["Free Cash Flow"] = model_df["FCF"]
+
+st.dataframe(
+    cashflow_df.style.format("{:,.0f}")
+)
+
+# =================================================
+# DCF CALCULATION
+# =================================================
 model_df = model_df.copy()
 
 model_df["Discount Factor"] = [
@@ -143,42 +165,16 @@ terminal_value = (
 )
 
 pv_terminal_value = terminal_value * model_df["Discount Factor"].iloc[-1]
-
 enterprise_value = model_df["PV of FCF"].sum() + pv_terminal_value
 
-# -------------------------------------------------
-# Bridge Table
-# -------------------------------------------------
-bridge_table = model_df[[
-    "Revenue",
-    "EBITDA",
-    "Tax",
-    "PAT",
-    "FCF",
-    "Discount Factor",
-    "PV of FCF"
-]]
-
-st.dataframe(
-    bridge_table.style.format({
-        "Revenue": "{:,.0f}",
-        "EBITDA": "{:,.0f}",
-        "Tax": "{:,.0f}",
-        "PAT": "{:,.0f}",
-        "FCF": "{:,.0f}",
-        "Discount Factor": "{:.2f}",
-        "PV of FCF": "{:,.0f}",
-    })
-)
-
-# -------------------------------------------------
-# Valuation Summary
-# -------------------------------------------------
+# =================================================
+# TABLE 3: VALUATION SUMMARY
+# =================================================
 st.subheader("💰 Valuation Summary")
 
-valuation_summary = pd.DataFrame({
+valuation_df = pd.DataFrame({
     "Item": [
-        "PV of FCF (Projection Period)",
+        "PV of Free Cash Flows (Projection Period)",
         "Terminal Value",
         "PV of Terminal Value",
         "Enterprise Value"
@@ -191,19 +187,27 @@ valuation_summary = pd.DataFrame({
     ]
 })
 
-st.dataframe(valuation_summary.style.format({"Amount": "{:,.0f}"}))
+st.dataframe(
+    valuation_df.style.format({"Amount": "{:,.0f}"})
+)
+
 st.metric("Enterprise Value", f"{enterprise_value:,.0f}")
 
 # -------------------------------------------------
 # Download
 # -------------------------------------------------
-st.subheader("⬇️ Download Selected Scenario")
+st.subheader("⬇️ Download Selected Scenario Model")
 
-csv = model_df.reset_index().rename(columns={"index": "Year"}).to_csv(index=False)
+download_df = pd.concat(
+    [pnl_table, cashflow_df, model_df[["Discount Factor", "PV of FCF"]]],
+    axis=1
+)
+
+csv = download_df.reset_index().rename(columns={"index": "Year"}).to_csv(index=False)
 
 st.download_button(
     f"Download {selected_scenario} Case CSV",
     csv,
-    f"{selected_scenario}_Case_Financial_Model.csv",
+    f"{selected_scenario}_Financial_Model.csv",
     "text/csv"
 )
