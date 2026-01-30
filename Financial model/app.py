@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 # =================================================
 st.set_page_config(page_title="Financial Model – Investor View", layout="wide")
 st.title("📊 Financial Model – Investor-Ready Valuation Model")
-st.caption("Clean tables • no index column • proper formatting • detailed DCF • editable scenarios")
+st.caption("Clean tables • no index column • proper formatting • detailed DCF • scenario editing")
 
 # =================================================
 # CSS – CENTER ALIGN ALL TABLE CELLS
@@ -57,9 +57,21 @@ def show_table(df: pd.DataFrame, title: str | None = None):
     )
 
 # =================================================
+# DEFAULT SCENARIOS (stored in session state)
+# =================================================
+if "scenarios" not in st.session_state:
+    st.session_state["scenarios"] = {
+        "Bear": {"growth": 0.07, "margin": 0.20},
+        "Base": {"growth": 0.12, "margin": 0.25},
+        "Bull": {"growth": 0.18, "margin": 0.30},
+    }
+
+scenarios = st.session_state["scenarios"]
+
+# =================================================
 # SIDEBAR ASSUMPTIONS
 # =================================================
-st.sidebar.header("🔧 Assumptions")
+st.sidebar.header("🔧 Global Assumptions")
 
 projection_years = st.sidebar.slider("Projection Years", 3, 10, 5)
 base_revenue = st.sidebar.number_input("Last Historical Revenue", value=1120.0, step=100.0)
@@ -71,24 +83,35 @@ discount_rate = st.sidebar.slider("WACC", 0.08, 0.18, 0.12, 0.01)
 terminal_growth = st.sidebar.slider("Terminal Growth Rate", 0.02, 0.06, 0.04, 0.005)
 
 # =================================================
-# EDITABLE SCENARIOS (Revenue growth + EBITDA margin)
+# SIDEBAR: EDIT ONE SCENARIO AT A TIME
 # =================================================
 st.sidebar.header("📌 Scenario Inputs (Editable)")
 
-bear_growth = st.sidebar.number_input("Bear: Revenue Growth (%)", value=7.00, step=0.50) / 100
-bear_margin = st.sidebar.number_input("Bear: EBITDA Margin (%)", value=20.00, step=0.50) / 100
+edit_scenario = st.sidebar.selectbox(
+    "Which scenario do you want to edit?",
+    options=["Bear", "Base", "Bull"]
+)
 
-base_growth = st.sidebar.number_input("Base: Revenue Growth (%)", value=12.00, step=0.50) / 100
-base_margin = st.sidebar.number_input("Base: EBITDA Margin (%)", value=25.00, step=0.50) / 100
+# Pull current values
+current_growth = scenarios[edit_scenario]["growth"] * 100
+current_margin = scenarios[edit_scenario]["margin"] * 100
 
-bull_growth = st.sidebar.number_input("Bull: Revenue Growth (%)", value=18.00, step=0.50) / 100
-bull_margin = st.sidebar.number_input("Bull: EBITDA Margin (%)", value=30.00, step=0.50) / 100
+new_growth_pct = st.sidebar.number_input(
+    f"{edit_scenario}: Revenue Growth (%)",
+    value=float(current_growth),
+    step=0.50
+)
 
-scenarios = {
-    "Bear": {"growth": bear_growth, "margin": bear_margin},
-    "Base": {"growth": base_growth, "margin": base_margin},
-    "Bull": {"growth": bull_growth, "margin": bull_margin},
-}
+new_margin_pct = st.sidebar.number_input(
+    f"{edit_scenario}: EBITDA Margin (%)",
+    value=float(current_margin),
+    step=0.50
+)
+
+if st.sidebar.button("✅ Save Scenario Changes"):
+    scenarios[edit_scenario]["growth"] = new_growth_pct / 100
+    scenarios[edit_scenario]["margin"] = new_margin_pct / 100
+    st.sidebar.success(f"{edit_scenario} scenario updated!")
 
 # =================================================
 # SCENARIO ASSUMPTIONS TABLE
@@ -103,9 +126,9 @@ assump = pd.DataFrame({
 show_table(assump)
 
 # =================================================
-# TOGGLE SCENARIO
+# TOGGLE SCENARIO FOR MODEL OUTPUT
 # =================================================
-selected = st.radio("🎯 Select Scenario", list(scenarios.keys()), horizontal=True)
+selected = st.radio("🎯 Select Scenario to Run Model", list(scenarios.keys()), horizontal=True)
 growth = scenarios[selected]["growth"]
 margin = scenarios[selected]["margin"]
 
@@ -128,7 +151,7 @@ for _ in years:
 df = pd.DataFrame(rows, columns=["Revenue", "EBITDA", "Tax", "PAT", "FCF"], index=years)
 
 # =================================================
-# OPTIONAL: TREND CHART
+# TREND CHART
 # =================================================
 st.subheader(f"📈 {selected} Case – Financial Trends")
 fig, ax = plt.subplots()
