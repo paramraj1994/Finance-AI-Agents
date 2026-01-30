@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 # =================================================
 st.set_page_config(page_title="Financial Model – Investor View", layout="wide")
 st.title("📊 Financial Model – Investor-Ready Valuation Model")
-st.caption("Proper layout • readable headings • correct number formatting")
+st.caption("Clean tables • no index column • proper formatting")
 
 # =================================================
 # CSS – CENTER ALIGN ALL TABLE CELLS
@@ -69,10 +69,10 @@ scenarios = {
 }
 
 st.subheader("📌 Scenario Assumptions")
-assump = pd.DataFrame(scenarios).T.reset_index().rename(columns={"index": "Scenario"})
+assump = pd.DataFrame(scenarios).T.reset_index(drop=True)
 assump["Revenue Growth"] = assump["growth"].apply(lambda x: fmt_pct_2(x * 100))
 assump["EBITDA Margin"] = assump["margin"].apply(lambda x: fmt_pct_2(x * 100))
-assump = assump[["Scenario", "Revenue Growth", "EBITDA Margin"]]
+assump = assump[["Revenue Growth", "EBITDA Margin"]]
 st.dataframe(assump, use_container_width=True)
 
 selected = st.radio("Select Scenario", scenarios.keys(), horizontal=True)
@@ -123,7 +123,7 @@ for y in years:
         fmt_currency(df.loc[y, "PAT"])
     ]
 
-st.dataframe(pnl, use_container_width=True)
+st.dataframe(pnl.reset_index(drop=True), use_container_width=True)
 
 # =================================================
 # CASH FLOW STATEMENT
@@ -147,7 +147,7 @@ for y in years:
         fmt_currency(df.loc[y, "FCF"])
     ]
 
-st.dataframe(cf, use_container_width=True)
+st.dataframe(cf.reset_index(drop=True), use_container_width=True)
 
 # =================================================
 # DISCOUNTED CASH FLOW
@@ -177,7 +177,7 @@ for i, y in enumerate(years):
         fmt_currency(pv_fcf[i])
     ]
 
-st.dataframe(dcf, use_container_width=True)
+st.dataframe(dcf.reset_index(drop=True), use_container_width=True)
 
 # =================================================
 # TERMINAL VALUE
@@ -205,7 +205,7 @@ tv = pd.DataFrame({
     ]
 })
 
-st.dataframe(tv, use_container_width=True)
+st.dataframe(tv.reset_index(drop=True), use_container_width=True)
 
 # =================================================
 # ENTERPRISE VALUE
@@ -226,5 +226,5 @@ ev = pd.DataFrame({
 })
 
 st.subheader("🏁 Enterprise Value Summary")
-st.dataframe(ev, use_container_width=True)
+st.dataframe(ev.reset_index(drop=True), use_container_width=True)
 st.metric("Enterprise Value", fmt_currency(enterprise_value))
