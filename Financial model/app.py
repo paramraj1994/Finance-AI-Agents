@@ -3,46 +3,67 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 
-# -------------------------------------------------
-# Page Setup
-# -------------------------------------------------
-st.set_page_config(page_title="Financial Model – Detailed Valuation", layout="wide")
-st.title("📊 Financial Model – Detailed Valuation Model")
-st.caption("P&L • Cash Flow • Fully Explained DCF Valuation")
+# =================================================
+# PAGE SETUP
+# =================================================
+st.set_page_config(page_title="Financial Model – Final Investor View", layout="wide")
+st.title("📊 Financial Model – Investor-Ready Valuation")
+st.caption("P&L • Cash Flow • DCF • Clean Formatting")
 
-# -------------------------------------------------
-# CSS: Center align all tables
-# -------------------------------------------------
-st.markdown(
-    """
-    <style>
-    div[data-testid="stDataFrame"] table th,
-    div[data-testid="stDataFrame"] table td {
-        text-align: center !important;
-        vertical-align: middle !important;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True
-)
+# =================================================
+# CSS – CENTER ALIGN ALL TABLE VALUES
+# =================================================
+st.markdown("""
+<style>
+div[data-testid="stDataFrame"] table th,
+div[data-testid="stDataFrame"] table td {
+    text-align: center !important;
+    vertical-align: middle !important;
+}
+</style>
+""", unsafe_allow_html=True)
 
-# -------------------------------------------------
-# Sidebar Assumptions
-# -------------------------------------------------
-st.sidebar.header("🔧 Key Assumptions")
+# =================================================
+# FORMATTERS
+# =================================================
+def fmt_num(x):
+    try:
+        return f"{int(round(float(x))):,}"
+    except:
+        return ""
+
+def fmt_pct(x):
+    try:
+        return f"{float(x):.1f}%"
+    except:
+        return ""
+
+def format_table(df, percent_rows=set()):
+    out = df.copy()
+    for r in out.index:
+        if r in percent_rows:
+            out.loc[r] = out.loc[r].apply(fmt_pct)
+        else:
+            out.loc[r] = out.loc[r].apply(fmt_num)
+    return out
+
+# =================================================
+# SIDEBAR ASSUMPTIONS
+# =================================================
+st.sidebar.header("🔧 Assumptions")
 
 projection_years = st.sidebar.slider("Projection Years", 3, 10, 5)
 base_revenue = st.sidebar.number_input("Last Historical Revenue", value=1120.0, step=100.0)
 
-tax_rate = st.sidebar.slider("Tax Rate (%)", 0.15, 0.40, 0.25, 0.01)
+tax_rate = st.sidebar.slider("Tax Rate", 0.15, 0.40, 0.25, 0.01)
 reinvestment_rate = st.sidebar.slider("Reinvestment (% of PAT)", 0.0, 0.50, 0.10, 0.01)
 
-discount_rate = st.sidebar.slider("Discount Rate (WACC)", 0.08, 0.18, 0.12, 0.01)
-terminal_growth = st.sidebar.slider("Terminal Growth Rate", 0.02, 0.06, 0.04, 0.005)
+discount_rate = st.sidebar.slider("WACC", 0.08, 0.18, 0.12, 0.01)
+terminal_growth = st.sidebar.slider("Terminal Growth", 0.02, 0.06, 0.04, 0.005)
 
-# -------------------------------------------------
-# Scenario Definitions
-# -------------------------------------------------
+# =================================================
+# SCENARIOS
+# =================================================
 scenarios = {
     "Bear": {"growth": 0.07, "margin": 0.20},
     "Base": {"growth": 0.12, "margin": 0.25},
@@ -50,22 +71,22 @@ scenarios = {
 }
 
 st.subheader("📌 Scenario Assumptions")
-assumptions_df = pd.DataFrame(scenarios).T
-assumptions_df["growth"] = assumptions_df["growth"].map(lambda x: f"{x:.1%}")
-assumptions_df["margin"] = assumptions_df["margin"].map(lambda x: f"{x:.1%}")
-st.dataframe(assumptions_df)
+assump = pd.DataFrame(scenarios).T
+assump["growth"] = assump["growth"].map(lambda x: f"{x:.1%}")
+assump["margin"] = assump["margin"].map(lambda x: f"{x:.1%}")
+st.dataframe(assump)
 
-selected = st.radio("🎯 Select Scenario", scenarios.keys(), horizontal=True)
+selected = st.radio("Select Scenario", scenarios.keys(), horizontal=True)
 growth = scenarios[selected]["growth"]
 margin = scenarios[selected]["margin"]
 
 years = [f"Year {i+1}" for i in range(projection_years)]
 
-# -------------------------------------------------
-# Build Financial Model
-# -------------------------------------------------
+# =================================================
+# BUILD MODEL
+# =================================================
 revenue = base_revenue
-data = {"Revenue": [], "EBITDA": [], "Tax": [], "PAT": [], "FCF": []}
+model = {"Revenue": [], "EBITDA": [], "Tax": [], "PAT": [], "FCF": []}
 
 for _ in years:
     revenue *= (1 + growth)
@@ -74,126 +95,116 @@ for _ in years:
     pat = ebitda - tax
     fcf = pat * (1 - reinvestment_rate)
 
-    data["Revenue"].append(revenue)
-    data["EBITDA"].append(ebitda)
-    data["Tax"].append(tax)
-    data["PAT"].append(pat)
-    data["FCF"].append(fcf)
+    model["Revenue"].append(revenue)
+    model["EBITDA"].append(ebitda)
+    model["Tax"].append(tax)
+    model["PAT"].append(pat)
+    model["FCF"].append(fcf)
 
-model_df = pd.DataFrame(data, index=years)
+df = pd.DataFrame(model, index=years)
 
-# -------------------------------------------------
-# Profit & Loss (Vertical)
-# -------------------------------------------------
+# =================================================
+# PROFIT & LOSS (VERTICAL)
+# =================================================
 st.subheader("📑 Profit & Loss Statement")
 
-pnl = pd.DataFrame({
-    "Formula": [
-        "Revenueₜ = Revenueₜ₋₁ × (1 + Growth)",
-        "EBITDA = Revenue × EBITDA Margin",
-        "Tax = EBITDA × Tax Rate",
-        "PAT = EBITDA − Tax"
-    ],
-    "Year 1": [model_df.iloc[0]["Revenue"], model_df.iloc[0]["EBITDA"],
-               model_df.iloc[0]["Tax"], model_df.iloc[0]["PAT"]],
-}).set_index(pd.Index(["Revenue", "EBITDA", "Tax", "PAT"]))
+pnl = pd.DataFrame(index=[
+    "Revenue",
+    "EBITDA Margin (%)",
+    "EBITDA",
+    "Tax Rate (%)",
+    "Tax",
+    "Profit After Tax (PAT)"
+], columns=years)
 
-for i, y in enumerate(years):
-    pnl[y] = model_df.iloc[i][["Revenue", "EBITDA", "Tax", "PAT"]].values
+pnl.loc["Revenue"] = df["Revenue"].values
+pnl.loc["EBITDA Margin (%)"] = margin * 100
+pnl.loc["EBITDA"] = df["EBITDA"].values
+pnl.loc["Tax Rate (%)"] = tax_rate * 100
+pnl.loc["Tax"] = df["Tax"].values
+pnl.loc["Profit After Tax (PAT)"] = df["PAT"].values
 
-st.dataframe(pnl.round(0))
+st.dataframe(format_table(
+    pnl,
+    percent_rows={"EBITDA Margin (%)", "Tax Rate (%)"}
+))
 
-# -------------------------------------------------
-# Cash Flow Statement
-# -------------------------------------------------
+# =================================================
+# CASH FLOW STATEMENT
+# =================================================
 st.subheader("💵 Cash Flow Statement")
 
-cf = pd.DataFrame({
-    "Formula": [
-        "From P&L",
-        "Reinvestment = PAT × rate",
-        "FCF = PAT − Reinvestment"
-    ],
-    "Year 1": [
-        model_df.iloc[0]["PAT"],
-        -reinvestment_rate * model_df.iloc[0]["PAT"],
-        model_df.iloc[0]["FCF"]
-    ]
-}, index=["PAT", "Reinvestment", "FCF"])
+cf = pd.DataFrame(index=[
+    "Profit After Tax (PAT)",
+    "Reinvestment Rate (%)",
+    "Less: Reinvestment",
+    "Free Cash Flow (FCF)"
+], columns=years)
 
-for i, y in enumerate(years):
-    cf[y] = [
-        model_df.iloc[i]["PAT"],
-        -reinvestment_rate * model_df.iloc[i]["PAT"],
-        model_df.iloc[i]["FCF"]
-    ]
+cf.loc["Profit After Tax (PAT)"] = df["PAT"].values
+cf.loc["Reinvestment Rate (%)"] = reinvestment_rate * 100
+cf.loc["Less: Reinvestment"] = -(reinvestment_rate * df["PAT"]).values
+cf.loc["Free Cash Flow (FCF)"] = df["FCF"].values
 
-st.dataframe(cf.round(0))
+st.dataframe(format_table(
+    cf,
+    percent_rows={"Reinvestment Rate (%)"}
+))
 
-# -------------------------------------------------
-# DCF CALCULATION — DETAILED
-# -------------------------------------------------
-st.subheader("💰 Discounted Cash Flow Valuation")
+# =================================================
+# DCF CALCULATION
+# =================================================
+discount_factors = [(1 / (1 + discount_rate) ** (i + 1)) for i in range(projection_years)]
+pv_fcf = [df["FCF"].iloc[i] * discount_factors[i] for i in range(projection_years)]
 
-discount_factors = []
-pv_fcf = []
+dcf = pd.DataFrame(index=years)
+dcf["Free Cash Flow"] = df["FCF"].values
+dcf["Discount Factor"] = discount_factors
+dcf["PV of FCF"] = pv_fcf
 
-for i in range(projection_years):
-    df = 1 / ((1 + discount_rate) ** (i + 1))
-    discount_factors.append(df)
-    pv_fcf.append(model_df["FCF"].iloc[i] * df)
+st.subheader("💰 Discounted Cash Flow")
 
-dcf_table = pd.DataFrame({
-    "Free Cash Flow": model_df["FCF"].values,
-    "Discount Factor": discount_factors,
-    "PV of FCF": pv_fcf
-}, index=years)
+st.dataframe(format_table(dcf))
 
-st.markdown("### 🔹 Present Value of Explicit Cash Flows")
-st.dataframe(dcf_table.round(2))
-
-# -------------------------------------------------
-# TERMINAL VALUE — FULL BREAKDOWN
-# -------------------------------------------------
-st.markdown("### 🔹 Terminal Value Calculation")
-
-last_fcf = model_df["FCF"].iloc[-1]
-
-terminal_value = (
-    last_fcf * (1 + terminal_growth)
-    / (discount_rate - terminal_growth)
-)
-
+# =================================================
+# TERMINAL VALUE
+# =================================================
+last_fcf = df["FCF"].iloc[-1]
+terminal_value = (last_fcf * (1 + terminal_growth)) / (discount_rate - terminal_growth)
 pv_terminal = terminal_value * discount_factors[-1]
 
-terminal_table = pd.DataFrame({
-    "Value": [
+tv = pd.DataFrame({
+    "Amount": [
         last_fcf,
-        terminal_growth,
-        discount_rate,
+        terminal_growth * 100,
+        discount_rate * 100,
         terminal_value,
         pv_terminal
     ]
 }, index=[
     "Final Year FCF",
-    "Terminal Growth Rate",
-    "Discount Rate (WACC)",
-    "Terminal Value = FCF × (1+g)/(WACC−g)",
+    "Terminal Growth Rate (%)",
+    "Discount Rate (WACC %)",
+    "Terminal Value",
     "PV of Terminal Value"
 ])
 
-st.dataframe(terminal_table.round(4))
+st.subheader("📘 Terminal Value Calculation")
+st.dataframe(format_table(
+    tv,
+    percent_rows={"Terminal Growth Rate (%)", "Discount Rate (WACC %)"}
+))
 
-# -------------------------------------------------
+# =================================================
 # ENTERPRISE VALUE
-# -------------------------------------------------
-st.subheader("🏁 Enterprise Value")
+# =================================================
+enterprise_value = sum(pv_fcf) + pv_terminal
 
-ev_table = pd.DataFrame({
+ev = pd.DataFrame({
     "Amount": [
         sum(pv_fcf),
         pv_terminal,
-        sum(pv_fcf) + pv_terminal
+        enterprise_value
     ]
 }, index=[
     "PV of Explicit FCFs",
@@ -201,29 +212,6 @@ ev_table = pd.DataFrame({
     "Enterprise Value"
 ])
 
-st.dataframe(ev_table.round(0))
-st.metric("Enterprise Value", f"{(sum(pv_fcf) + pv_terminal):,.0f}")
-
-# -------------------------------------------------
-# Explanation
-# -------------------------------------------------
-with st.expander("🧠 Valuation Explanation"):
-    st.markdown(f"""
-**Step 1 — Project Cash Flows**  
-Free Cash Flow is derived from PAT after reinvestment.
-
-**Step 2 — Discount Cash Flows**  
-Each FCF is discounted using WACC = **{discount_rate:.0%}**
-
-**Step 3 — Terminal Value**  
-Calculated using Gordon Growth Model:
-
-Terminal Value =  
-FCF × (1 + g) / (WACC − g)
-
-where g = **{terminal_growth:.0%}**
-
-**Step 4 — Enterprise Value**  
-Enterprise Value =  
-PV of explicit FCFs + PV of terminal value
-""")
+st.subheader("🏁 Enterprise Value")
+st.dataframe(format_table(ev))
+st.metric("Enterprise Value", fmt_num(enterprise_value))
