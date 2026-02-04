@@ -134,7 +134,7 @@ def merge_defaults(defaults: dict, incoming: dict | None) -> dict:
     return out
 
 # =================================================
-# Audit utilities
+# AUDIT (robust, no clicking required)
 # =================================================
 def audit_key(table: str, line_item: str, year: str) -> str:
     return f"{table}||{line_item}||{year}"
@@ -145,22 +145,24 @@ def audit_pack(formula: str, components: list[tuple[str, float | str]], notes: s
 def show_audit_panel(audit_store: dict, table: str, line_item: str, year: str):
     k = audit_key(table, line_item, year)
     payload = audit_store.get(k)
-    st.markdown("### 🔍 Audit")
+
+    st.markdown("### 🔍 Audit Trace")
     st.write(f"**Table:** {table}  |  **Line Item:** {line_item}  |  **Year:** {year}")
 
     if not payload:
-        st.info("No audit trace available for this cell.")
+        st.info("No audit trace available for this selection.")
         return
 
     st.write("**Formula**")
-    st.code(payload["formula"], language="text")
+    st.code(payload.get("formula", ""), language="text")
 
-    if payload.get("notes"):
-        st.caption(payload["notes"])
+    notes = payload.get("notes", "")
+    if notes:
+        st.caption(notes)
 
     st.write("**Inputs / Components**")
     rows = []
-    for name, val in payload["components"]:
+    for name, val in payload.get("components", []):
         if isinstance(val, str):
             vdisp = val
         else:
@@ -168,52 +170,23 @@ def show_audit_panel(audit_store: dict, table: str, line_item: str, year: str):
         rows.append({"Component": name, "Value": vdisp})
     st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
 
-def render_auditable_table(title: str, table_name: str, df_display: pd.DataFrame, audit_store: dict, key_prefix: str):
-    st.subheader(title)
-    st.caption("Click a cell to see the audit trace below (if your Streamlit version supports selection).")
+def audit_selector_ui(audit_store: dict, default_table="PnL", default_item="EBITDA", default_year="Year 1", key_prefix="audit"):
+    keys = list(audit_store.keys())
+    if not keys:
+        st.info("No audit traces found.")
+        return
 
-    # Use st.dataframe with selection when available (Streamlit >= 1.31-ish).
-    # Fallback: dropdown selectors.
-    df_to_show = df_display.copy()
+    parts = [k.split("||") for k in keys]
+    tables = sorted(list({p[0] for p in parts}))
+    table = st.selectbox("Table", tables, index=tables.index(default_table) if default_table in tables else 0, key=f"{key_prefix}_table")
 
-    selection_supported = True
-    try:
-        st.dataframe(
-            df_to_show,
-            hide_index=True,
-            use_container_width=True,
-            key=f"{key_prefix}_df",
-            on_select="rerun",
-            selection_mode="single-cell",
-        )
-    except TypeError:
-        selection_supported = False
-        st.dataframe(df_to_show, hide_index=True, use_container_width=True)
+    items = sorted(list({p[1] for p in parts if p[0] == table}))
+    item = st.selectbox("Line Item", items, index=items.index(default_item) if default_item in items else 0, key=f"{key_prefix}_item")
 
-    st.divider()
+    years = sorted(list({p[2] for p in parts if p[0] == table and p[1] == item}))
+    year = st.selectbox("Year", years, index=years.index(default_year) if default_year in years else 0, key=f"{key_prefix}_year")
 
-    if selection_supported:
-        state = st.session_state.get(f"{key_prefix}_df", {})
-        sel = state.get("selection", {}) if isinstance(state, dict) else {}
-        rows = sel.get("rows", [])
-        cols = sel.get("columns", [])
-        if rows and cols:
-            r = rows[0]
-            c = cols[0]
-            # Expect first column is "Line Item"
-            line_item = str(df_to_show.iloc[r, 0])
-            year = str(df_to_show.columns[c])
-            if year == "Line Item":
-                st.info("Select a numeric year column to audit.")
-            else:
-                show_audit_panel(audit_store, table_name, line_item, year)
-        else:
-            st.info("Select a cell above to view its audit trace.")
-    else:
-        st.info("Your Streamlit version doesn't support cell selection here. Use the dropdowns below.")
-        li = st.selectbox("Line Item", df_to_show["Line Item"].tolist(), key=f"{key_prefix}_li")
-        yr = st.selectbox("Year", [c for c in df_to_show.columns if c != "Line Item"], key=f"{key_prefix}_yr")
-        show_audit_panel(audit_store, table_name, li, yr)
+    show_audit_panel(audit_store, table, item, year)
 
 # =================================================
 # Defaults
@@ -308,7 +281,9 @@ if "selected_scenario" not in st.session_state:
 # =================================================
 # Tabs
 # =================================================
-tab_assump, tab_model, tab_dash, tab_audit = st.tabs(["🧾 Assumptions", "📑 Financial Model", "📊 Dashboard", "🔍 Audit"])
+tab_assump, tab_model, tab_dash, tab_audit = st.tabs(
+    ["🧾 Assumptions", "📑 Financial Model", "📊 Dashboard", "🔍 Audit"]
+)
 
 # =================================================
 # Model Builder + Audit Trace
@@ -348,7 +323,6 @@ def build_saas_model(globals_dict: dict, scenario: dict, terminal_method: str):
     for i in range(n):
         year = years[i]
 
-        # Subscriber acquisition mechanics
         new_customers = customers_beg * new_cust_growth[i]
         churned_customers = customers_beg * gross_churn[i]
         customers_end = max(customers_beg + new_customers - churned_customers, 0.0)
@@ -357,23 +331,16 @@ def build_saas_model(globals_dict: dict, scenario: dict, terminal_method: str):
 
         arpa = arpa * (1 + arpa_growth[i])
 
-        # ARR approximation
         arr = customers_avg * arpa * nrr[i]
         revenue = arr * rev_rec
 
         gross_profit = revenue * gm[i]
         cogs = revenue - gross_profit
 
-        # Total S&M from % revenue
         sm_total = revenue * sm_pct[i]
-
-        # Split S&M into Brand vs Acquisition “bucket”
         brand_marketing = sm_total * brand_share
 
-        # CAC spend is driven by new customers
         cac_spend = new_customers * cac[i]
-
-        # Acquisition spend = remaining S&M after brand, but at least enough to cover CAC if CAC is higher
         acquisition_other = max(sm_total - brand_marketing - cac_spend, 0.0)
         acquisition_total = cac_spend + acquisition_other
 
@@ -389,6 +356,7 @@ def build_saas_model(globals_dict: dict, scenario: dict, terminal_method: str):
         capex_val = revenue * capex_pct_rev
         nwc = revenue * nwc_pct_rev
         delta_nwc = nwc - prev_nwc
+        prev_nwc_prev = prev_nwc
         prev_nwc = nwc
 
         fcf = nopat + da - capex_val - delta_nwc
@@ -407,155 +375,88 @@ def build_saas_model(globals_dict: dict, scenario: dict, terminal_method: str):
             capex_val, delta_nwc, fcf,
         ])
 
-        # -------------------------
-        # AUDIT TRACES (Core)
-        # -------------------------
+        # ------- AUDIT TRACES -------
         audit[audit_key("Drivers", "ARR", year)] = audit_pack(
             "ARR = Avg Customers × ARPA × NRR",
             [
-                ("Avg Customers = (Customers Beg + Customers End) / 2", customers_avg),
                 ("Customers Beg", customers_beg),
                 ("Customers End", customers_end),
+                ("Avg Customers", customers_avg),
                 ("ARPA", arpa),
                 ("NRR", f"{(nrr[i]*100):.2f}%"),
             ],
-            notes="ARR is approximated using average customers and NRR uplift."
         )
         audit[audit_key("Drivers", "Revenue", year)] = audit_pack(
             "Revenue = ARR × Revenue Recognition",
-            [
-                ("ARR", arr),
-                ("Revenue Recognition", f"{(rev_rec*100):.2f}%"),
-            ]
+            [("ARR", arr), ("Revenue Recognition", f"{(rev_rec*100):.2f}%")],
         )
         audit[audit_key("PnL", "Gross Profit", year)] = audit_pack(
             "Gross Profit = Revenue × Gross Margin",
-            [
-                ("Revenue", revenue),
-                ("Gross Margin", f"{(gm[i]*100):.2f}%"),
-            ]
+            [("Revenue", revenue), ("Gross Margin", f"{(gm[i]*100):.2f}%")],
         )
         audit[audit_key("PnL", "COGS", year)] = audit_pack(
             "COGS = Revenue − Gross Profit",
-            [
-                ("Revenue", revenue),
-                ("Gross Profit", gross_profit),
-            ]
+            [("Revenue", revenue), ("Gross Profit", gross_profit)],
         )
         audit[audit_key("PnL", "Sales & Marketing (Total)", year)] = audit_pack(
             "S&M (Total) = Revenue × S&M % of Revenue",
-            [
-                ("Revenue", revenue),
-                ("S&M % of Revenue", f"{(sm_pct[i]*100):.2f}%"),
-            ]
+            [("Revenue", revenue), ("S&M %", f"{(sm_pct[i]*100):.2f}%")],
         )
         audit[audit_key("Marketing", "Brand Marketing", year)] = audit_pack(
             "Brand Marketing = S&M (Total) × Brand Share",
-            [
-                ("S&M (Total)", sm_total),
-                ("Brand Share of S&M", f"{(brand_share*100):.2f}%"),
-            ]
+            [("S&M (Total)", sm_total), ("Brand Share", f"{(brand_share*100):.2f}%")],
         )
         audit[audit_key("Marketing", "CAC Spend", year)] = audit_pack(
             "CAC Spend = New Customers × CAC per New Customer",
-            [
-                ("New Customers", new_customers),
-                ("CAC per New Customer", cac[i]),
-            ]
+            [("New Customers", new_customers), ("CAC per New", cac[i])],
         )
         audit[audit_key("Marketing", "Acquisition Other", year)] = audit_pack(
             "Acquisition Other = max(S&M − Brand Marketing − CAC Spend, 0)",
-            [
-                ("S&M (Total)", sm_total),
-                ("Brand Marketing", brand_marketing),
-                ("CAC Spend", cac_spend),
-                ("Floor at 0", "Applied"),
-            ]
+            [("S&M (Total)", sm_total), ("Brand Marketing", brand_marketing), ("CAC Spend", cac_spend), ("Floor", "0")],
         )
         audit[audit_key("Marketing", "Acquisition (Total)", year)] = audit_pack(
             "Acquisition (Total) = CAC Spend + Acquisition Other",
-            [
-                ("CAC Spend", cac_spend),
-                ("Acquisition Other", acquisition_other),
-            ]
+            [("CAC Spend", cac_spend), ("Acquisition Other", acquisition_other)],
         )
         audit[audit_key("PnL", "R&D", year)] = audit_pack(
             "R&D = Revenue × R&D % of Revenue",
-            [
-                ("Revenue", revenue),
-                ("R&D %", f"{(rnd_pct[i]*100):.2f}%"),
-            ]
+            [("Revenue", revenue), ("R&D %", f"{(rnd_pct[i]*100):.2f}%")],
         )
         audit[audit_key("PnL", "G&A", year)] = audit_pack(
             "G&A = Revenue × G&A % of Revenue",
-            [
-                ("Revenue", revenue),
-                ("G&A %", f"{(ga_pct[i]*100):.2f}%"),
-            ]
+            [("Revenue", revenue), ("G&A %", f"{(ga_pct[i]*100):.2f}%")],
         )
         audit[audit_key("PnL", "EBITDA", year)] = audit_pack(
             "EBITDA = Gross Profit − S&M − R&D − G&A",
-            [
-                ("Gross Profit", gross_profit),
-                ("Sales & Marketing (Total)", sm_total),
-                ("R&D", rnd),
-                ("G&A", ga),
-            ]
+            [("Gross Profit", gross_profit), ("S&M", sm_total), ("R&D", rnd), ("G&A", ga)],
         )
         audit[audit_key("PnL", "D&A", year)] = audit_pack(
             "D&A = Revenue × D&A % of Revenue",
-            [
-                ("Revenue", revenue),
-                ("D&A %", f"{(da_pct_rev*100):.2f}%"),
-            ]
+            [("Revenue", revenue), ("D&A %", f"{(da_pct_rev*100):.2f}%")],
         )
         audit[audit_key("PnL", "EBIT", year)] = audit_pack(
             "EBIT = EBITDA − D&A",
-            [
-                ("EBITDA", ebitda),
-                ("D&A", da),
-            ]
+            [("EBITDA", ebitda), ("D&A", da)],
         )
         audit[audit_key("PnL", "NOPAT", year)] = audit_pack(
             "NOPAT = EBIT × (1 − Tax Rate)",
-            [
-                ("EBIT", ebit),
-                ("Tax Rate", f"{(tax*100):.2f}%"),
-            ]
+            [("EBIT", ebit), ("Tax Rate", f"{(tax*100):.2f}%")],
         )
         audit[audit_key("Cash Flow", "Capex", year)] = audit_pack(
             "Capex = Revenue × Capex % of Revenue",
-            [
-                ("Revenue", revenue),
-                ("Capex %", f"{(capex_pct_rev*100):.2f}%"),
-            ]
+            [("Revenue", revenue), ("Capex %", f"{(capex_pct_rev*100):.2f}%")],
         )
         audit[audit_key("Cash Flow", "ΔNWC", year)] = audit_pack(
-            "ΔNWC = NWC(t) − NWC(t−1), where NWC = Revenue × NWC % of Revenue",
-            [
-                ("NWC(t) = Revenue × NWC %", nwc),
-                ("Revenue", revenue),
-                ("NWC %", f"{(nwc_pct_rev*100):.2f}%"),
-                ("NWC(t−1)", (prev_nwc - delta_nwc)),
-            ]
+            "ΔNWC = NWC(t) − NWC(t−1), NWC = Revenue × NWC % of Revenue",
+            [("NWC(t)", nwc), ("NWC(t−1)", prev_nwc_prev), ("NWC %", f"{(nwc_pct_rev*100):.2f}%")],
         )
         audit[audit_key("Cash Flow", "FCF", year)] = audit_pack(
             "FCF = NOPAT + D&A − Capex − ΔNWC",
-            [
-                ("NOPAT", nopat),
-                ("D&A", da),
-                ("Capex", capex_val),
-                ("ΔNWC", delta_nwc),
-            ]
+            [("NOPAT", nopat), ("D&A", da), ("Capex", capex_val), ("ΔNWC", delta_nwc)],
         )
         audit[audit_key("Acquisition", "CAC Payback (months)", year)] = audit_pack(
-            "CAC Payback (months) = CAC per New / (Monthly Gross Profit per Customer)\nMonthly GP/Customer = (ARPA × GM) / 12",
-            [
-                ("CAC per New", cac[i]),
-                ("ARPA", arpa),
-                ("Gross Margin", f"{(gm[i]*100):.2f}%"),
-                ("Monthly GP/Customer", gp_per_cust_per_month if np.isfinite(gp_per_cust_per_month) else "NA"),
-            ]
+            "CAC Payback (months) = CAC per New / ((ARPA × GM)/12)",
+            [("CAC per New", cac[i]), ("ARPA", arpa), ("GM", f"{(gm[i]*100):.2f}%"), ("Monthly GP/customer", gp_per_cust_per_month if np.isfinite(gp_per_cust_per_month) else "NA")],
         )
 
         customers_beg = customers_end
@@ -578,18 +479,17 @@ def build_saas_model(globals_dict: dict, scenario: dict, terminal_method: str):
     df["Gross Margin (%)"] = np.where(df["Revenue"] > 0, (df["Gross Profit"] / df["Revenue"]) * 100, np.nan)
     df["EBITDA Margin (%)"] = np.where(df["Revenue"] > 0, (df["EBITDA"] / df["Revenue"]) * 100, np.nan)
 
-    discount_factors = np.array([1 / ((1 + float(globals_dict["wacc_pct"]) / 100.0) ** (i + 1)) for i in range(n)], dtype=float)
+    discount_factors = np.array([1 / ((1 + wacc) ** (i + 1)) for i in range(n)], dtype=float)
     df["Discount Factor"] = discount_factors
     df["PV of FCF"] = df["FCF"].values * discount_factors
 
-    wacc = float(globals_dict["wacc_pct"]) / 100.0
     if terminal_method == "Gordon Growth":
         tv = np.nan if wacc <= tg else (df["FCF"].iloc[-1] * (1 + tg) / (wacc - tg))
-        tv_formula = "Terminal Value (Gordon) = FCF_last × (1 + g) / (WACC − g)"
+        tv_formula = "TV (Gordon) = FCF_last × (1 + g) / (WACC − g)"
         tv_components = [("FCF_last", float(df["FCF"].iloc[-1])), ("g", f"{tg*100:.2f}%"), ("WACC", f"{wacc*100:.2f}%")]
     else:
         tv = df["Revenue"].iloc[-1] * float(globals_dict["exit_multiple_ev_rev"])
-        tv_formula = "Terminal Value (Exit Multiple) = Revenue_last × Exit Multiple (EV/Revenue)"
+        tv_formula = "TV (Exit Multiple) = Revenue_last × Exit Multiple"
         tv_components = [("Revenue_last", float(df["Revenue"].iloc[-1])), ("Exit Multiple", float(globals_dict["exit_multiple_ev_rev"]))]
 
     pv_tv = tv * discount_factors[-1] if np.isfinite(tv) else np.nan
@@ -599,28 +499,23 @@ def build_saas_model(globals_dict: dict, scenario: dict, terminal_method: str):
     equity_value = ev - float(globals_dict["net_debt"]) + float(globals_dict["cash"])
     tv_share = (pv_tv / ev) if ev != 0 and np.isfinite(pv_tv) else np.nan
 
-    # Audit for DCF / Valuation (use "Year N" for TV reference)
     yearN = years[-1]
-    audit[audit_key("DCF", "Discount Factor", yearN)] = audit_pack(
-        "Discount Factor (Year N) = 1 / (1 + WACC)^N",
-        [("WACC", f"{wacc*100:.2f}%"), ("N", len(years)), ("Discount Factor", float(discount_factors[-1]))]
-    )
-    audit[audit_key("DCF", "PV of Terminal Value", yearN)] = audit_pack(
-        "PV(TV) = Terminal Value × Discount Factor (Year N)",
-        [("Terminal Value", float(tv) if np.isfinite(tv) else "NA"), ("Discount Factor", float(discount_factors[-1]))]
-    )
     audit[audit_key("Valuation", "Terminal Value", yearN)] = audit_pack(tv_formula, tv_components)
+    audit[audit_key("Valuation", "PV of Terminal Value", yearN)] = audit_pack(
+        "PV(TV) = TV × Discount Factor (Year N)",
+        [("TV", float(tv) if np.isfinite(tv) else "NA"), ("Discount Factor (Year N)", float(discount_factors[-1]))],
+    )
     audit[audit_key("Valuation", "PV of Explicit FCFs", yearN)] = audit_pack(
-        "PV of Explicit FCFs = Sum(PV of FCF for each forecast year)",
-        [("PV of FCF (sum)", pv_explicit)]
+        "PV of Explicit FCFs = Σ PV(FCF_t)",
+        [("Sum PV of FCF", pv_explicit)],
     )
     audit[audit_key("Valuation", "Enterprise Value", yearN)] = audit_pack(
-        "Enterprise Value = PV of Explicit FCFs + PV of Terminal Value",
-        [("PV of Explicit FCFs", pv_explicit), ("PV of Terminal Value", float(pv_tv) if np.isfinite(pv_tv) else "NA")]
+        "EV = PV Explicit FCFs + PV(TV)",
+        [("PV Explicit", pv_explicit), ("PV(TV)", float(pv_tv) if np.isfinite(pv_tv) else "NA")],
     )
     audit[audit_key("Valuation", "Equity Value", yearN)] = audit_pack(
-        "Equity Value = Enterprise Value − Net Debt + Cash",
-        [("Enterprise Value", ev), ("Net Debt", float(globals_dict["net_debt"])), ("Cash", float(globals_dict["cash"]))]
+        "Equity Value = EV − Net Debt + Cash",
+        [("EV", ev), ("Net Debt", float(globals_dict["net_debt"])), ("Cash", float(globals_dict["cash"]))],
     )
 
     return {
@@ -663,18 +558,13 @@ with tab_assump:
         g["base_customers"] = float(st.number_input("Starting Customers", value=float(g.get("base_customers", 200.0)), step=10.0))
         g["base_arpa"] = float(st.number_input("Starting ARPA (Annual $/Customer)", value=float(g.get("base_arpa", 6000.0)), step=250.0))
 
-    st.markdown("### Marketing Split (inside Sales & Marketing)")
+    st.markdown("### Marketing Split")
     g["brand_marketing_share_of_sm_pct"] = float(
-        st.number_input(
-            "Brand/Programs share of S&M (%)",
-            value=float(g.get("brand_marketing_share_of_sm_pct", 30.0)),
-            step=5.0
-        )
+        st.number_input("Brand/Programs share of S&M (%)", value=float(g.get("brand_marketing_share_of_sm_pct", 30.0)), step=5.0)
     )
-
     st.session_state["globals"] = g
 
-    st.markdown("### Terminal Value Method")
+    st.markdown("### Terminal Method")
     st.session_state["terminal_method"] = st.radio(
         "Choose terminal method",
         ["Gordon Growth", "Exit Multiple (EV/Revenue)"],
@@ -710,7 +600,7 @@ with tab_assump:
         "G&A (% Rev)": st.session_state["scenarios"][selected_scn]["ga_pct_rev"],
     })
 
-    st.caption("Edit values in the grid. All % columns use percent units (10 = 10%).")
+    st.caption("Edit values. % columns use percent units (10 = 10%).")
     edited = st.data_editor(edit_df, hide_index=True, disabled=["Year"], use_container_width=True)
 
     col_map = {
@@ -732,7 +622,7 @@ with tab_assump:
         st.success(f"{selected_scn} scenario saved.")
 
 # =================================================
-# Compute model for selected scenario
+# Compute model
 # =================================================
 globals_dict = merge_defaults(DEFAULT_GLOBALS, st.session_state.get("globals", {}))
 terminal_method = st.session_state.get("terminal_method", "Gordon Growth")
@@ -752,45 +642,23 @@ all_results = {
 }
 
 # =================================================
-# FINANCIAL MODEL TAB (Auditable tables)
+# FINANCIAL MODEL TAB
 # =================================================
 with tab_model:
     st.subheader(f"📑 Financial Model – {selected} Scenario")
 
+    # Audit mode panel (works even when click doesn't)
+    with st.expander("🔍 Audit Mode (works without clicking)"):
+        audit_selector_ui(audit_store, default_table="PnL", default_item="EBITDA", default_year="Year 1", key_prefix="fm_audit")
+
     sub_core, sub_acq, sub_mkt = st.tabs(["📑 Core Statements", "👥 Subscriber Acquisition", "📣 Marketing Spend"])
 
     with sub_core:
-        # Drivers table (display)
-        drivers = pd.DataFrame({"Line Item": [
-            "ARR",
-            "Revenue",
-            "Gross Profit",
-            "EBITDA",
-            "NOPAT",
-            "FCF",
-        ]})
-        for y in years:
-            drivers[y] = [
-                fmt_currency(df.loc[y, "ARR"]),
-                fmt_currency(df.loc[y, "Revenue"]),
-                fmt_currency(df.loc[y, "Gross Profit"]),
-                fmt_currency(df.loc[y, "EBITDA"]),
-                fmt_currency(df.loc[y, "NOPAT"]),
-                fmt_currency(df.loc[y, "FCF"]),
-            ]
-        render_auditable_table("🧭 Key Drivers (click to audit)", "Drivers", drivers, audit_store, "drivers")
-
+        st.subheader("📑 Profit & Loss")
         pnl = pd.DataFrame({"Line Item": [
-            "Revenue",
-            "COGS",
-            "Gross Profit",
-            "Sales & Marketing (Total)",
-            "R&D",
-            "G&A",
-            "EBITDA",
-            "D&A",
-            "EBIT",
-            "NOPAT"
+            "Revenue", "COGS", "Gross Profit",
+            "Sales & Marketing (Total)", "R&D", "G&A",
+            "EBITDA", "D&A", "EBIT", "NOPAT"
         ]})
         for y in years:
             pnl[y] = [
@@ -805,15 +673,10 @@ with tab_model:
                 fmt_currency(df.loc[y, "EBIT"]),
                 fmt_currency(df.loc[y, "NOPAT"]),
             ]
-        render_auditable_table("📑 Profit & Loss (click a number to audit)", "PnL", pnl, audit_store, "pnl")
+        st.dataframe(pnl, hide_index=True, use_container_width=True)
 
-        cf = pd.DataFrame({"Line Item": [
-            "NOPAT",
-            "D&A",
-            "Capex",
-            "ΔNWC",
-            "FCF"
-        ]})
+        st.subheader("💵 Cash Flow")
+        cf = pd.DataFrame({"Line Item": ["NOPAT", "D&A", "Capex", "ΔNWC", "FCF"]})
         for y in years:
             cf[y] = [
                 fmt_currency(df.loc[y, "NOPAT"]),
@@ -822,27 +685,12 @@ with tab_model:
                 fmt_currency(df.loc[y, "ΔNWC"]),
                 fmt_currency(df.loc[y, "FCF"]),
             ]
-        render_auditable_table("💵 Cash Flow (click to audit)", "Cash Flow", cf, audit_store, "cf")
+        st.dataframe(cf, hide_index=True, use_container_width=True)
 
-        dcf = pd.DataFrame({"Line Item": ["FCF", "Discount Factor", "PV of FCF"]})
-        for y in years:
-            dcf[y] = [
-                fmt_currency(df.loc[y, "FCF"]),
-                fmt_float2(df.loc[y, "Discount Factor"]),
-                fmt_currency(df.loc[y, "PV of FCF"]),
-            ]
-        render_auditable_table("💰 DCF Detail (click to audit)", "DCF", dcf, audit_store, "dcf")
-
-        # Valuation (auditable using Year N)
+        st.subheader("📘 Valuation Summary")
         yearN = years[-1]
         val = pd.DataFrame({
-            "Line Item": [
-                "Terminal Value",
-                "PV of Terminal Value",
-                "PV of Explicit FCFs",
-                "Enterprise Value",
-                "Equity Value",
-            ],
+            "Line Item": ["Terminal Value", "PV of Terminal Value", "PV of Explicit FCFs", "Enterprise Value", "Equity Value"],
             yearN: [
                 fmt_currency(result["terminal_value"]),
                 fmt_currency(result["pv_terminal_value"]),
@@ -851,17 +699,13 @@ with tab_model:
                 fmt_currency(result["equity_value"]),
             ]
         })
-        render_auditable_table("📘 Valuation Summary (click to audit)", "Valuation", val, audit_store, "val")
+        st.dataframe(val, hide_index=True, use_container_width=True)
 
     with sub_acq:
+        st.subheader("👥 Subscriber Acquisition")
         acq = pd.DataFrame({"Line Item": [
-            "Customers (Beg)",
-            "New Customers",
-            "Churned Customers",
-            "Net Adds",
-            "Customers (End)",
-            "CAC Spend",
-            "CAC Payback (months)"
+            "Customers (Beg)", "New Customers", "Churned Customers", "Net Adds", "Customers (End)",
+            "CAC Spend", "CAC Payback (months)"
         ]})
         for y in years:
             acq[y] = [
@@ -873,15 +717,12 @@ with tab_model:
                 fmt_currency(df.loc[y, "CAC Spend"]),
                 fmt_float2(df.loc[y, "CAC Payback (months)"]) if np.isfinite(df.loc[y, "CAC Payback (months)"]) else "",
             ]
-        render_auditable_table("👥 Subscriber Acquisition (click to audit)", "Acquisition", acq, audit_store, "acq")
+        st.dataframe(acq, hide_index=True, use_container_width=True)
 
     with sub_mkt:
+        st.subheader("📣 Marketing Spend")
         mkt = pd.DataFrame({"Line Item": [
-            "Sales & Marketing (Total)",
-            "Brand Marketing",
-            "CAC Spend",
-            "Acquisition Other",
-            "Acquisition (Total)",
+            "Sales & Marketing (Total)", "Brand Marketing", "CAC Spend", "Acquisition Other", "Acquisition (Total)"
         ]})
         for y in years:
             mkt[y] = [
@@ -891,7 +732,7 @@ with tab_model:
                 fmt_currency(df.loc[y, "Acquisition Other"]),
                 fmt_currency(df.loc[y, "Acquisition (Total)"]),
             ]
-        render_auditable_table("📣 Marketing Spend (click to audit)", "Marketing", mkt, audit_store, "mkt")
+        st.dataframe(mkt, hide_index=True, use_container_width=True)
 
 # =================================================
 # DASHBOARD TAB
@@ -952,28 +793,12 @@ with tab_dash:
     st.pyplot(fig)
 
 # =================================================
-# AUDIT TAB (manual audit lookup)
+# AUDIT TAB (Works everywhere)
 # =================================================
 with tab_audit:
-    st.subheader("🔍 Audit (manual lookup)")
-    st.caption("If you can't click cells in tables (older Streamlit), use this page to audit any metric.")
-
-    # Build dropdowns from existing audit keys
-    keys = list(audit_store.keys())
-    if not keys:
-        st.info("No audit trace available.")
-    else:
-        parts = [k.split("||") for k in keys]
-        tables = sorted(list({p[0] for p in parts}))
-        table = st.selectbox("Table", tables)
-
-        items = sorted(list({p[1] for p in parts if p[0] == table}))
-        line_item = st.selectbox("Line Item", items)
-
-        years_opt = sorted(list({p[2] for p in parts if p[0] == table and p[1] == line_item}))
-        year = st.selectbox("Year", years_opt)
-
-        show_audit_panel(audit_store, table, line_item, year)
+    st.subheader("🔍 Audit")
+    st.caption("Select any table/metric/year to see exactly how the number is calculated (no clicking required).")
+    audit_selector_ui(audit_store, default_table="PnL", default_item="EBITDA", default_year="Year 1", key_prefix="audit_tab")
 
 # =================================================
 # Export Excel
@@ -1005,7 +830,6 @@ def to_excel_bytes():
 
         df.to_excel(writer, sheet_name="Model", index=True)
 
-        # Add audit dump (optional)
         audit_rows = []
         for k, v in audit_store.items():
             t, li, yr = k.split("||")
