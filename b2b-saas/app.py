@@ -134,7 +134,7 @@ def merge_defaults(defaults: dict, incoming: dict | None) -> dict:
     return out
 
 # =================================================
-# AUDIT (robust, no clicking required)
+# AUDIT (selector-based, no clicking required)
 # =================================================
 def audit_key(table: str, line_item: str, period: str) -> str:
     return f"{table}||{line_item}||{period}"
@@ -191,51 +191,11 @@ def audit_selector_ui(audit_store: dict, default_table="PnL", default_item="EBIT
     show_audit_panel(audit_store, table, item, period)
 
 # =================================================
-# Period conversion helpers
-# =================================================
-def annual_pct_to_monthly_decimal(pct_annual: float) -> float:
-    """Converts annual % (e.g., 12 for 12%) to monthly decimal compounding."""
-    a = float(pct_annual) / 100.0
-    return (1.0 + a) ** (1.0 / 12.0) - 1.0
-
-def annual_multiplier_to_monthly_multiplier(mult_annual: float) -> float:
-    """Converts annual multiplier (e.g., NRR 1.10) to monthly multiplier."""
-    return float(mult_annual) ** (1.0 / 12.0)
-
-def repeat_yearly_to_monthly(values_yearly: list, n_years: int, mode: str):
-    """
-    Expand year-wise assumptions into month-wise arrays of length n_years*12.
-    mode:
-      - "pct_growth": annual % that should compound to monthly rate (growth, churn, arpa growth)
-      - "pct_level": annual % that stays same each month (GM%, cost %)
-      - "nrr_pct": NRR in % as annual multiplier then take 12th root
-      - "value": numeric repeated each month (CAC per new)
-    """
-    vals = ensure_len(values_yearly, n_years, fill=None)
-    out = []
-    for y in range(n_years):
-        v = 0.0 if vals[y] is None else float(vals[y])
-        if mode == "pct_growth":
-            m = annual_pct_to_monthly_decimal(v)
-            out.extend([m] * 12)
-        elif mode == "pct_level":
-            out.extend([v / 100.0] * 12)
-        elif mode == "nrr_pct":
-            annual_mult = (v / 100.0) if v > 0 else 1.0
-            m_mult = annual_multiplier_to_monthly_multiplier(annual_mult)
-            out.extend([m_mult] * 12)
-        elif mode == "value":
-            out.extend([v] * 12)
-        else:
-            out.extend([v] * 12)
-    return np.array(out, dtype=float)
-
-# =================================================
 # Defaults
 # =================================================
 DEFAULT_GLOBALS = {
     "projection_years": 5,
-    "reporting_period": "Annual",  # NEW
+    "reporting_period": "Annual",  # Annual | Monthly
     "tax_rate_pct": 25.0,
     "wacc_pct": 12.0,
     "terminal_growth_pct": 4.0,
@@ -292,7 +252,7 @@ SCN_KEYS = [
     "gross_margin_pct", "cac_per_new", "sm_pct_rev", "rnd_pct_rev", "ga_pct_rev"
 ]
 
-def normalize_scenarios(scenarios_obj: dict | None, years: int) -> dict:
+def normalize_scenarios_annual(scenarios_obj: dict | None, years: int) -> dict:
     out = {}
     for name in ["Bear", "Base", "Bull"]:
         base = json.loads(json.dumps(DEFAULT_SCENARIOS[name]))
@@ -306,6 +266,27 @@ def normalize_scenarios(scenarios_obj: dict | None, years: int) -> dict:
         out[name] = base
     return out
 
+def normalize_scenarios_monthly(scenarios_obj: dict | None, months: int) -> dict:
+    """
+    Monthly scenario store is expected to already be month-wise.
+    If missing, we initialize month-wise arrays by repeating the first annual default values.
+    """
+    out = {}
+    for name in ["Bear", "Base", "Bull"]:
+        incoming = scenarios_obj.get(name, {}) if isinstance(scenarios_obj, dict) else {}
+        base = {}
+        for k in SCN_KEYS:
+            arr = incoming.get(k, None)
+            if isinstance(arr, list) and len(arr) > 0:
+                base[k] = ensure_len(arr, months, fill=arr[-1])
+            else:
+                # fallback: take annual default first year value and repeat
+                annual_default = DEFAULT_SCENARIOS[name].get(k, [0.0])
+                seed = float(annual_default[0]) if annual_default else 0.0
+                base[k] = [seed] * months
+        out[name] = base
+    return out
+
 # =================================================
 # Session State Init
 # =================================================
@@ -314,10 +295,15 @@ if "globals" not in st.session_state:
 else:
     st.session_state["globals"] = merge_defaults(DEFAULT_GLOBALS, st.session_state["globals"])
 
-if "scenarios" not in st.session_state:
-    st.session_state["scenarios"] = json.loads(json.dumps(DEFAULT_SCENARIOS))
+if "scenarios_annual" not in st.session_state:
+    st.session_state["scenarios_annual"] = json.loads(json.dumps(DEFAULT_SCENARIOS))
+
+if "scenarios_monthly" not in st.session_state:
+    st.session_state["scenarios_monthly"] = {}  # created lazily
+
 if "terminal_method" not in st.session_state:
     st.session_state["terminal_method"] = "Gordon Growth"
+
 if "selected_scenario" not in st.session_state:
     st.session_state["selected_scenario"] = "Base"
 
@@ -329,54 +315,48 @@ tab_assump, tab_model, tab_dash, tab_audit = st.tabs(
 )
 
 # =================================================
-# Model Builder + Audit Trace (supports Annual / Monthly)
+# Model Builder (uses annual or monthly assumptions based on toggle)
 # =================================================
-def build_saas_model(globals_dict: dict, scenario: dict, terminal_method: str):
+def build_saas_model(globals_dict: dict, scenario_annual: dict, scenario_monthly: dict | None, terminal_method: str):
     n_years = int(globals_dict["projection_years"])
     reporting = globals_dict.get("reporting_period", "Annual")
 
-    # Period setup
     if reporting == "Monthly":
         n = n_years * 12
         periods = [f"Month {i+1}" for i in range(n)]
-        periods_per_year = 12
+        # use monthly store (must exist by now)
+        scn = scenario_monthly
+        # interpret monthly inputs directly:
+        new_cust_growth = np.array(ensure_len(scn["new_cust_growth_pct"], n, fill=0.0), dtype=float) / 100.0
+        gross_churn     = np.array(ensure_len(scn["gross_churn_pct"], n, fill=0.0), dtype=float) / 100.0
+        nrr_mult        = np.array(ensure_len(scn["nrr_pct"], n, fill=100.0), dtype=float) / 100.0  # monthly multiplier in %
+        arpa_growth     = np.array(ensure_len(scn["arpa_growth_pct"], n, fill=0.0), dtype=float) / 100.0
+
+        gm              = np.array(ensure_len(scn["gross_margin_pct"], n, fill=75.0), dtype=float) / 100.0
+        sm_pct          = np.array(ensure_len(scn["sm_pct_rev"], n, fill=0.0), dtype=float) / 100.0
+        rnd_pct         = np.array(ensure_len(scn["rnd_pct_rev"], n, fill=0.0), dtype=float) / 100.0
+        ga_pct          = np.array(ensure_len(scn["ga_pct_rev"], n, fill=0.0), dtype=float) / 100.0
+        cac_per_new     = np.array(ensure_len(scn["cac_per_new"], n, fill=0.0), dtype=float)
     else:
         n = n_years
         periods = [f"Year {i+1}" for i in range(n)]
-        periods_per_year = 1
+        scn = scenario_annual
+        new_cust_growth = np.array(ensure_len(scn["new_cust_growth_pct"], n, fill=0.0), dtype=float) / 100.0
+        gross_churn     = np.array(ensure_len(scn["gross_churn_pct"], n, fill=0.0), dtype=float) / 100.0
+        nrr_mult        = np.array(ensure_len(scn["nrr_pct"], n, fill=100.0), dtype=float) / 100.0
+        arpa_growth     = np.array(ensure_len(scn["arpa_growth_pct"], n, fill=0.0), dtype=float) / 100.0
 
-    # Base inputs
-    customers_beg = float(globals_dict["base_customers"])
-    arpa_annual = float(globals_dict["base_arpa"])  # annual $ per customer
+        gm              = np.array(ensure_len(scn["gross_margin_pct"], n, fill=75.0), dtype=float) / 100.0
+        sm_pct          = np.array(ensure_len(scn["sm_pct_rev"], n, fill=0.0), dtype=float) / 100.0
+        rnd_pct         = np.array(ensure_len(scn["rnd_pct_rev"], n, fill=0.0), dtype=float) / 100.0
+        ga_pct          = np.array(ensure_len(scn["ga_pct_rev"], n, fill=0.0), dtype=float) / 100.0
+        cac_per_new     = np.array(ensure_len(scn["cac_per_new"], n, fill=0.0), dtype=float)
 
-    # Scenario inputs
-    if reporting == "Monthly":
-        new_cust_growth = repeat_yearly_to_monthly(scenario["new_cust_growth_pct"], n_years, "pct_growth")
-        gross_churn     = repeat_yearly_to_monthly(scenario["gross_churn_pct"], n_years, "pct_growth")
-        nrr_mult        = repeat_yearly_to_monthly(scenario["nrr_pct"], n_years, "nrr_pct")
-        arpa_growth     = repeat_yearly_to_monthly(scenario["arpa_growth_pct"], n_years, "pct_growth")
-
-        gm              = repeat_yearly_to_monthly(scenario["gross_margin_pct"], n_years, "pct_level")
-        sm_pct          = repeat_yearly_to_monthly(scenario["sm_pct_rev"], n_years, "pct_level")
-        rnd_pct         = repeat_yearly_to_monthly(scenario["rnd_pct_rev"], n_years, "pct_level")
-        ga_pct          = repeat_yearly_to_monthly(scenario["ga_pct_rev"], n_years, "pct_level")
-        cac_per_new     = repeat_yearly_to_monthly(scenario["cac_per_new"], n_years, "value")
-    else:
-        new_cust_growth = np.array(ensure_len(scenario["new_cust_growth_pct"], n, fill=0.0), dtype=float) / 100.0
-        gross_churn     = np.array(ensure_len(scenario["gross_churn_pct"], n, fill=0.0), dtype=float) / 100.0
-        nrr_mult        = np.array(ensure_len(scenario["nrr_pct"], n, fill=100.0), dtype=float) / 100.0
-        arpa_growth     = np.array(ensure_len(scenario["arpa_growth_pct"], n, fill=0.0), dtype=float) / 100.0
-
-        gm              = np.array(ensure_len(scenario["gross_margin_pct"], n, fill=75.0), dtype=float) / 100.0
-        sm_pct          = np.array(ensure_len(scenario["sm_pct_rev"], n, fill=0.0), dtype=float) / 100.0
-        rnd_pct         = np.array(ensure_len(scenario["rnd_pct_rev"], n, fill=0.0), dtype=float) / 100.0
-        ga_pct          = np.array(ensure_len(scenario["ga_pct_rev"], n, fill=0.0), dtype=float) / 100.0
-        cac_per_new     = np.array(ensure_len(scenario["cac_per_new"], n, fill=0.0), dtype=float)
-
-    # Global assumptions
-    tax_rate_annual = float(globals_dict["tax_rate_pct"]) / 100.0
+    # globals
+    tax_annual = float(globals_dict["tax_rate_pct"]) / 100.0
     wacc_annual = float(globals_dict["wacc_pct"]) / 100.0
     tg_annual = float(globals_dict["terminal_growth_pct"]) / 100.0
+
     rev_rec = float(globals_dict["revenue_recognition_pct_of_arr"]) / 100.0
     da_pct_rev = float(globals_dict["da_pct_rev"]) / 100.0
     capex_pct_rev = float(globals_dict["capex_pct_rev"]) / 100.0
@@ -385,17 +365,19 @@ def build_saas_model(globals_dict: dict, scenario: dict, terminal_method: str):
     brand_share = float(globals_dict.get("brand_marketing_share_of_sm_pct", 30.0)) / 100.0
     brand_share = min(max(brand_share, 0.0), 1.0)
 
-    # Periodic versions
+    customers_beg = float(globals_dict["base_customers"])
+    arpa_annual = float(globals_dict["base_arpa"])  # annual $ per customer
+    arpa = arpa_annual
+
+    # discount rates
     if reporting == "Monthly":
         wacc = (1 + wacc_annual) ** (1/12) - 1
         tg = (1 + tg_annual) ** (1/12) - 1
-        tax_rate = tax_rate_annual / 12.0  # simple monthly allocation
-        arpa = arpa_annual
+        tax = tax_annual / 12.0  # simple monthly allocation
     else:
         wacc = wacc_annual
         tg = tg_annual
-        tax_rate = tax_rate_annual
-        arpa = arpa_annual
+        tax = tax_annual
 
     prev_nwc = 0.0
     rows = []
@@ -404,31 +386,28 @@ def build_saas_model(globals_dict: dict, scenario: dict, terminal_method: str):
     for i in range(n):
         period = periods[i]
 
-        # Customer mechanics
         new_customers = customers_beg * new_cust_growth[i]
         churned_customers = customers_beg * gross_churn[i]
         customers_end = max(customers_beg + new_customers - churned_customers, 0.0)
         customers_avg = (customers_beg + customers_end) / 2.0
         net_adds = customers_end - customers_beg
 
-        # ARPA growth
         arpa = arpa * (1 + arpa_growth[i])
 
-        # ARR approximation (annualized)
+        # ARR annualized
         arr = customers_avg * arpa * nrr_mult[i]
 
-        # Revenue recognition
+        # revenue recognition:
         # Annual: Revenue = ARR × rev_rec
         # Monthly: Revenue = (ARR / 12) × rev_rec
         revenue = (arr * rev_rec) if reporting == "Annual" else (arr * rev_rec / 12.0)
 
-        # Gross profit / COGS
         gross_profit = revenue * gm[i]
         cogs = revenue - gross_profit
 
-        # Opex
         sm_total = revenue * sm_pct[i]
         brand_marketing = sm_total * brand_share
+
         cac_spend = new_customers * cac_per_new[i]
         acquisition_other = max(sm_total - brand_marketing - cac_spend, 0.0)
         acquisition_total = cac_spend + acquisition_other
@@ -436,15 +415,12 @@ def build_saas_model(globals_dict: dict, scenario: dict, terminal_method: str):
         rnd = revenue * rnd_pct[i]
         ga = revenue * ga_pct[i]
 
-        # EBITDA
         ebitda = gross_profit - sm_total - rnd - ga
 
-        # D&A, EBIT, NOPAT (periodic tax)
         da = revenue * da_pct_rev
         ebit = ebitda - da
-        nopat = ebit * (1 - tax_rate)
+        nopat = ebit * (1 - tax)
 
-        # FCF build
         capex_val = revenue * capex_pct_rev
         nwc = revenue * nwc_pct_rev
         delta_nwc = nwc - prev_nwc
@@ -453,7 +429,6 @@ def build_saas_model(globals_dict: dict, scenario: dict, terminal_method: str):
 
         fcf = nopat + da - capex_val - delta_nwc
 
-        # CAC Payback months (works in both modes, because ARPA is annual)
         gp_per_cust_per_month = (arpa * gm[i]) / 12.0 if (arpa * gm[i]) > 0 else np.nan
         cac_payback_months = (cac_per_new[i] / gp_per_cust_per_month) if (gp_per_cust_per_month and np.isfinite(gp_per_cust_per_month)) else np.nan
 
@@ -468,21 +443,10 @@ def build_saas_model(globals_dict: dict, scenario: dict, terminal_method: str):
             capex_val, delta_nwc, fcf,
         ])
 
-        # ------- AUDIT TRACES -------
-        audit[audit_key("Drivers", "ARR", period)] = audit_pack(
-            "ARR = Avg Customers × ARPA × NRR",
-            [
-                ("Customers Beg", customers_beg),
-                ("Customers End", customers_end),
-                ("Avg Customers", customers_avg),
-                ("ARPA (annual)", arpa),
-                ("NRR", f"{(nrr_mult[i]*100):.2f}%"),
-            ],
-            notes="ARR is an annualized run-rate. Monthly revenue uses ARR/12."
-        )
+        # audit (key metrics)
         audit[audit_key("Drivers", "Revenue", period)] = audit_pack(
             "Revenue = ARR × Revenue Recognition" + (" / 12 (monthly)" if reporting == "Monthly" else ""),
-            [("ARR", arr), ("Revenue Recognition", f"{(rev_rec*100):.2f}%"), ("Divide by 12?", "Yes" if reporting == "Monthly" else "No")],
+            [("ARR", arr), ("Revenue Recognition", f"{rev_rec*100:.2f}%"), ("Divide by 12?", "Yes" if reporting == "Monthly" else "No")],
         )
         audit[audit_key("PnL", "EBITDA", period)] = audit_pack(
             "EBITDA = Gross Profit − S&M − R&D − G&A",
@@ -513,14 +477,12 @@ def build_saas_model(globals_dict: dict, scenario: dict, terminal_method: str):
     df["Gross Margin (%)"] = np.where(df["Revenue"] > 0, (df["Gross Profit"] / df["Revenue"]) * 100, np.nan)
     df["EBITDA Margin (%)"] = np.where(df["Revenue"] > 0, (df["EBITDA"] / df["Revenue"]) * 100, np.nan)
 
-    # Discount factors
     discount_factors = np.array([1 / ((1 + wacc) ** (i + 1)) for i in range(n)], dtype=float)
     df["Discount Factor"] = discount_factors
     df["PV of FCF"] = df["FCF"].values * discount_factors
 
-    # Terminal value (computed from last period)
+    # terminal value based on last period
     last_period = periods[-1]
-
     if terminal_method == "Gordon Growth":
         if wacc <= tg:
             tv = np.nan
@@ -532,7 +494,6 @@ def build_saas_model(globals_dict: dict, scenario: dict, terminal_method: str):
             tv_formula = "TV (Gordon) = FCF_last × (1 + g) / (r − g)"
             tv_components = [("FCF_last", fcf_last), ("g", f"{tg*100:.2f}%"), ("r", f"{wacc*100:.2f}%")]
     else:
-        # Exit multiple uses annualized revenue if monthly
         revenue_last = float(df["Revenue"].iloc[-1])
         revenue_for_tv = revenue_last * (12.0 if reporting == "Monthly" else 1.0)
         tv = revenue_for_tv * float(globals_dict["exit_multiple_ev_rev"])
@@ -547,10 +508,6 @@ def build_saas_model(globals_dict: dict, scenario: dict, terminal_method: str):
     tv_share = (pv_tv / ev) if ev != 0 and np.isfinite(pv_tv) else np.nan
 
     audit[audit_key("Valuation", "Terminal Value", last_period)] = audit_pack(tv_formula, tv_components)
-    audit[audit_key("Valuation", "PV of Terminal Value", last_period)] = audit_pack(
-        "PV(TV) = TV × Discount Factor (last period)",
-        [("TV", float(tv) if np.isfinite(tv) else "NA"), ("Discount Factor", float(discount_factors[-1]))],
-    )
     audit[audit_key("Valuation", "Enterprise Value", last_period)] = audit_pack(
         "EV = PV Explicit FCFs + PV(TV)",
         [("PV Explicit", pv_explicit), ("PV(TV)", float(pv_tv) if np.isfinite(pv_tv) else "NA")],
@@ -574,7 +531,7 @@ def build_saas_model(globals_dict: dict, scenario: dict, terminal_method: str):
     }
 
 # =================================================
-# ASSUMPTIONS TAB
+# ASSUMPTIONS TAB (Annual editor OR Monthly editor)
 # =================================================
 with tab_assump:
     st.subheader("🧾 Assumptions")
@@ -582,13 +539,12 @@ with tab_assump:
     st.session_state["globals"] = merge_defaults(DEFAULT_GLOBALS, st.session_state.get("globals", {}))
     g = st.session_state["globals"]
 
-    # NEW: Reporting toggle
     g["reporting_period"] = st.radio(
         "Reporting Period",
         ["Annual", "Monthly"],
         horizontal=True,
         index=0 if g.get("reporting_period", "Annual") == "Annual" else 1,
-        help="Annual shows Year 1..N. Monthly runs 12× periods and converts year-wise assumptions into monthly equivalents."
+        help="Annual shows Year 1..N. Monthly shows Month 1..(N×12) and lets you edit month-wise assumptions directly."
     )
 
     c1, c2, c3, c4 = st.columns(4)
@@ -624,15 +580,9 @@ with tab_assump:
         index=0 if st.session_state.get("terminal_method", "Gordon Growth") == "Gordon Growth" else 1
     )
 
-    # Validation note for Gordon
-    wacc_a = float(g["wacc_pct"]) / 100.0
-    tg_a = float(g["terminal_growth_pct"]) / 100.0
-    if st.session_state["terminal_method"] == "Gordon Growth" and wacc_a <= tg_a:
-        st.error("❗ For Gordon Growth terminal value: WACC must be greater than Terminal Growth (annual inputs).")
-
+    # scenario selection
     st.divider()
-
-    st.markdown("### Scenario Assumptions (Year-wise)")
+    st.markdown("### Scenario Assumptions")
     st.session_state["selected_scenario"] = st.radio(
         "Select scenario to edit / run",
         ["Bear", "Base", "Bull"],
@@ -641,43 +591,106 @@ with tab_assump:
     )
     selected_scn = st.session_state["selected_scenario"]
 
-    n_years = int(st.session_state["globals"]["projection_years"])
-    st.session_state["scenarios"] = normalize_scenarios(st.session_state.get("scenarios", {}), n_years)
+    n_years = int(g["projection_years"])
+    reporting = g["reporting_period"]
 
-    years_labels = [f"Year {i+1}" for i in range(n_years)]
-    edit_df = pd.DataFrame({
-        "Year": years_labels,
-        "New Cust Growth (%)": st.session_state["scenarios"][selected_scn]["new_cust_growth_pct"],
-        "Gross Churn (%)": st.session_state["scenarios"][selected_scn]["gross_churn_pct"],
-        "NRR (%)": st.session_state["scenarios"][selected_scn]["nrr_pct"],
-        "ARPA Growth (%)": st.session_state["scenarios"][selected_scn]["arpa_growth_pct"],
-        "Gross Margin (%)": st.session_state["scenarios"][selected_scn]["gross_margin_pct"],
-        "CAC per New Cust": st.session_state["scenarios"][selected_scn]["cac_per_new"],
-        "S&M (% Rev)": st.session_state["scenarios"][selected_scn]["sm_pct_rev"],
-        "R&D (% Rev)": st.session_state["scenarios"][selected_scn]["rnd_pct_rev"],
-        "G&A (% Rev)": st.session_state["scenarios"][selected_scn]["ga_pct_rev"],
-    })
+    # normalize stores
+    st.session_state["scenarios_annual"] = normalize_scenarios_annual(st.session_state.get("scenarios_annual", {}), n_years)
 
-    st.caption("Edit year-wise values. Monthly mode converts these into monthly equivalents automatically.")
-    edited = st.data_editor(edit_df, hide_index=True, disabled=["Year"], use_container_width=True)
+    if reporting == "Monthly":
+        n_months = n_years * 12
+        st.session_state["scenarios_monthly"] = normalize_scenarios_monthly(st.session_state.get("scenarios_monthly", {}), n_months)
 
-    col_map = {
-        "New Cust Growth (%)": "new_cust_growth_pct",
-        "Gross Churn (%)": "gross_churn_pct",
-        "NRR (%)": "nrr_pct",
-        "ARPA Growth (%)": "arpa_growth_pct",
-        "Gross Margin (%)": "gross_margin_pct",
-        "CAC per New Cust": "cac_per_new",
-        "S&M (% Rev)": "sm_pct_rev",
-        "R&D (% Rev)": "rnd_pct_rev",
-        "G&A (% Rev)": "ga_pct_rev",
-    }
+        st.caption(
+            "Monthly editor: inputs are interpreted **per month**. "
+            "Example: NRR 100.50 means monthly multiplier 1.005."
+        )
 
-    if st.button("✅ Save Scenario Assumptions"):
-        for ui_col, key in col_map.items():
-            values = pd.to_numeric(edited[ui_col], errors="coerce").fillna(0.0).tolist()
-            st.session_state["scenarios"][selected_scn][key] = ensure_len(values, n_years, fill=0.0)
-        st.success(f"{selected_scn} scenario saved.")
+        months_labels = [f"Month {i+1}" for i in range(n_months)]
+        edit_df = pd.DataFrame({
+            "Month": months_labels,
+            "New Cust Growth (%)": st.session_state["scenarios_monthly"][selected_scn]["new_cust_growth_pct"],
+            "Gross Churn (%)": st.session_state["scenarios_monthly"][selected_scn]["gross_churn_pct"],
+            "NRR (%)": st.session_state["scenarios_monthly"][selected_scn]["nrr_pct"],
+            "ARPA Growth (%)": st.session_state["scenarios_monthly"][selected_scn]["arpa_growth_pct"],
+            "Gross Margin (%)": st.session_state["scenarios_monthly"][selected_scn]["gross_margin_pct"],
+            "CAC per New Cust": st.session_state["scenarios_monthly"][selected_scn]["cac_per_new"],
+            "S&M (% Rev)": st.session_state["scenarios_monthly"][selected_scn]["sm_pct_rev"],
+            "R&D (% Rev)": st.session_state["scenarios_monthly"][selected_scn]["rnd_pct_rev"],
+            "G&A (% Rev)": st.session_state["scenarios_monthly"][selected_scn]["ga_pct_rev"],
+        })
+
+        edited = st.data_editor(edit_df, hide_index=True, disabled=["Month"], use_container_width=True)
+
+        col_map = {
+            "New Cust Growth (%)": "new_cust_growth_pct",
+            "Gross Churn (%)": "gross_churn_pct",
+            "NRR (%)": "nrr_pct",
+            "ARPA Growth (%)": "arpa_growth_pct",
+            "Gross Margin (%)": "gross_margin_pct",
+            "CAC per New Cust": "cac_per_new",
+            "S&M (% Rev)": "sm_pct_rev",
+            "R&D (% Rev)": "rnd_pct_rev",
+            "G&A (% Rev)": "ga_pct_rev",
+        }
+
+        if st.button("✅ Save Monthly Scenario Assumptions"):
+            for ui_col, key in col_map.items():
+                values = pd.to_numeric(edited[ui_col], errors="coerce").fillna(0.0).tolist()
+                st.session_state["scenarios_monthly"][selected_scn][key] = ensure_len(values, n_months, fill=0.0)
+            st.success(f"{selected_scn} monthly scenario saved.")
+
+        with st.expander("🔁 Optional: Initialize Monthly from Annual (repeat each year into 12 months)"):
+            st.caption("This will overwrite your monthly inputs for the selected scenario.")
+            if st.button("Build Monthly Inputs from Annual for this Scenario"):
+                annual = st.session_state["scenarios_annual"][selected_scn]
+                n_months = n_years * 12
+                out = {}
+                for k in SCN_KEYS:
+                    yr_vals = ensure_len(annual.get(k, []), n_years, fill=0.0)
+                    out[k] = []
+                    for y in range(n_years):
+                        out[k].extend([float(yr_vals[y] if yr_vals[y] is not None else 0.0)] * 12)
+                    out[k] = ensure_len(out[k], n_months, fill=out[k][-1] if out[k] else 0.0)
+                st.session_state["scenarios_monthly"][selected_scn] = out
+                st.success("Monthly inputs initialized from annual. Refreshing…")
+                st.rerun()
+
+    else:
+        years_labels = [f"Year {i+1}" for i in range(n_years)]
+        edit_df = pd.DataFrame({
+            "Year": years_labels,
+            "New Cust Growth (%)": st.session_state["scenarios_annual"][selected_scn]["new_cust_growth_pct"],
+            "Gross Churn (%)": st.session_state["scenarios_annual"][selected_scn]["gross_churn_pct"],
+            "NRR (%)": st.session_state["scenarios_annual"][selected_scn]["nrr_pct"],
+            "ARPA Growth (%)": st.session_state["scenarios_annual"][selected_scn]["arpa_growth_pct"],
+            "Gross Margin (%)": st.session_state["scenarios_annual"][selected_scn]["gross_margin_pct"],
+            "CAC per New Cust": st.session_state["scenarios_annual"][selected_scn]["cac_per_new"],
+            "S&M (% Rev)": st.session_state["scenarios_annual"][selected_scn]["sm_pct_rev"],
+            "R&D (% Rev)": st.session_state["scenarios_annual"][selected_scn]["rnd_pct_rev"],
+            "G&A (% Rev)": st.session_state["scenarios_annual"][selected_scn]["ga_pct_rev"],
+        })
+
+        st.caption("Annual editor: values are interpreted per year.")
+        edited = st.data_editor(edit_df, hide_index=True, disabled=["Year"], use_container_width=True)
+
+        col_map = {
+            "New Cust Growth (%)": "new_cust_growth_pct",
+            "Gross Churn (%)": "gross_churn_pct",
+            "NRR (%)": "nrr_pct",
+            "ARPA Growth (%)": "arpa_growth_pct",
+            "Gross Margin (%)": "gross_margin_pct",
+            "CAC per New Cust": "cac_per_new",
+            "S&M (% Rev)": "sm_pct_rev",
+            "R&D (% Rev)": "rnd_pct_rev",
+            "G&A (% Rev)": "ga_pct_rev",
+        }
+
+        if st.button("✅ Save Annual Scenario Assumptions"):
+            for ui_col, key in col_map.items():
+                values = pd.to_numeric(edited[ui_col], errors="coerce").fillna(0.0).tolist()
+                st.session_state["scenarios_annual"][selected_scn][key] = ensure_len(values, n_years, fill=0.0)
+            st.success(f"{selected_scn} annual scenario saved.")
 
 # =================================================
 # Compute model
@@ -685,11 +698,17 @@ with tab_assump:
 globals_dict = merge_defaults(DEFAULT_GLOBALS, st.session_state.get("globals", {}))
 terminal_method = st.session_state.get("terminal_method", "Gordon Growth")
 selected = st.session_state.get("selected_scenario", "Base")
-
 n_years = int(globals_dict["projection_years"])
-st.session_state["scenarios"] = normalize_scenarios(st.session_state.get("scenarios", {}), n_years)
 
-result = build_saas_model(globals_dict, st.session_state["scenarios"][selected], terminal_method)
+scenarios_annual = normalize_scenarios_annual(st.session_state.get("scenarios_annual", {}), n_years)
+
+scenario_monthly = None
+if globals_dict.get("reporting_period") == "Monthly":
+    n_months = n_years * 12
+    st.session_state["scenarios_monthly"] = normalize_scenarios_monthly(st.session_state.get("scenarios_monthly", {}), n_months)
+    scenario_monthly = st.session_state["scenarios_monthly"][selected]
+
+result = build_saas_model(globals_dict, scenarios_annual[selected], scenario_monthly, terminal_method)
 df = result["df"]
 periods = result["periods"]
 audit_store = result["audit"]
@@ -794,7 +813,7 @@ with tab_model:
 with tab_dash:
     st.subheader(f"📊 Dashboard – {selected} Scenario ({reporting})")
 
-    # Keep dashboard readable: only chart first up to 24 months in monthly mode
+    # keep charts readable for monthly
     if reporting == "Monthly" and len(periods) > 24:
         chart_periods = periods[:24]
         dff = df.loc[chart_periods].copy()
@@ -804,9 +823,10 @@ with tab_dash:
         dff = df.copy()
         x_labels = periods
 
+    x_pos = np.arange(len(x_labels))
+
     st.markdown("### Revenue")
     fig, ax = plt.subplots()
-    x_pos = np.arange(len(x_labels))
     ax.plot(x_pos, dff["Revenue"].values, marker="o", label="Revenue")
     ax.set_xticks(x_pos)
     ax.set_xticklabels(x_labels, rotation=45, ha="right")
@@ -858,10 +878,11 @@ def to_excel_bytes():
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         pd.DataFrame([globals_dict]).to_excel(writer, sheet_name="Assumptions_Global", index=False)
 
-        sc_rows = []
+        # Annual scenarios
+        sc_rows_a = []
         for name in ["Bear", "Base", "Bull"]:
-            d = st.session_state["scenarios"][name]
-            sc_rows.append({
+            d = st.session_state["scenarios_annual"][name]
+            sc_rows_a.append({
                 "Scenario": name,
                 "New Cust Growth (%)": ", ".join([f"{v:.2f}" for v in d["new_cust_growth_pct"]]),
                 "Gross Churn (%)": ", ".join([f"{v:.2f}" for v in d["gross_churn_pct"]]),
@@ -873,7 +894,26 @@ def to_excel_bytes():
                 "R&D (% Rev)": ", ".join([f"{v:.2f}" for v in d["rnd_pct_rev"]]),
                 "G&A (% Rev)": ", ".join([f"{v:.2f}" for v in d["ga_pct_rev"]]),
             })
-        pd.DataFrame(sc_rows).to_excel(writer, sheet_name="Assumptions_Scenarios", index=False)
+        pd.DataFrame(sc_rows_a).to_excel(writer, sheet_name="Scenarios_Annual", index=False)
+
+        # Monthly scenarios (if any)
+        if isinstance(st.session_state.get("scenarios_monthly"), dict) and len(st.session_state["scenarios_monthly"]) > 0:
+            sc_rows_m = []
+            for name in ["Bear", "Base", "Bull"]:
+                d = st.session_state["scenarios_monthly"].get(name, {})
+                if not d:
+                    continue
+                sc_rows_m.append({
+                    "Scenario": name,
+                    "Months": len(d.get("new_cust_growth_pct", [])),
+                    "New Cust Growth (%)": ", ".join([f"{float(v):.2f}" for v in d.get("new_cust_growth_pct", [])[:60]]),
+                    "Gross Churn (%)": ", ".join([f"{float(v):.2f}" for v in d.get("gross_churn_pct", [])[:60]]),
+                    "NRR (%)": ", ".join([f"{float(v):.2f}" for v in d.get("nrr_pct", [])[:60]]),
+                    "ARPA Growth (%)": ", ".join([f"{float(v):.2f}" for v in d.get("arpa_growth_pct", [])[:60]]),
+                    "Note": "Saved as first 60 months in this sheet for readability. Full monthly series is used in the app."
+                })
+            if sc_rows_m:
+                pd.DataFrame(sc_rows_m).to_excel(writer, sheet_name="Scenarios_Monthly_Sample", index=False)
 
         df.to_excel(writer, sheet_name="Model", index=True)
 
