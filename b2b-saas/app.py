@@ -188,19 +188,56 @@ SCN_KEYS = [
 ]
 
 # =================================================
-# Session State Init
+# Safe merge utilities (fixes your KeyError)
+# =================================================
+def merge_defaults(defaults: dict, incoming: dict | None) -> dict:
+    """Return defaults overlaid with incoming keys (if incoming missing, use defaults)."""
+    out = defaults.copy()
+    if isinstance(incoming, dict):
+        for k, v in incoming.items():
+            out[k] = v
+    return out
+
+def normalize_scenarios(scenarios_obj: dict | None, years: int) -> dict:
+    """
+    Ensures Bear/Base/Bull exist and each has all SCN_KEYS arrays sized to 'years'.
+    Accepts older/partial formats and repairs them.
+    """
+    out = {}
+    for name in ["Bear", "Base", "Bull"]:
+        base = json.loads(json.dumps(DEFAULT_SCENARIOS[name]))  # deep copy
+        incoming = scenarios_obj.get(name, {}) if isinstance(scenarios_obj, dict) else {}
+        if isinstance(incoming, dict):
+            for k in SCN_KEYS:
+                if k in incoming:
+                    base[k] = incoming[k]
+        # enforce lengths
+        for k in SCN_KEYS:
+            base[k] = ensure_len(base.get(k, []), years, fill=None)
+        out[name] = base
+    return out
+
+# =================================================
+# Session State Init (with migration)
 # =================================================
 if "globals" not in st.session_state:
     st.session_state["globals"] = DEFAULT_GLOBALS.copy()
+else:
+    st.session_state["globals"] = merge_defaults(DEFAULT_GLOBALS, st.session_state["globals"])
+
 if "scenarios" not in st.session_state:
     st.session_state["scenarios"] = json.loads(json.dumps(DEFAULT_SCENARIOS))
+else:
+    # We'll normalize after we know projection_years (may be missing too)
+    pass
+
 if "terminal_method" not in st.session_state:
     st.session_state["terminal_method"] = "Gordon Growth"
 if "selected_scenario" not in st.session_state:
     st.session_state["selected_scenario"] = "Base"
 
 # =================================================
-# Tab Layout (Assumptions separate)
+# Tabs
 # =================================================
 tab_assump, tab_model, tab_dash = st.tabs(["🧾 Assumptions", "📑 Financial Model", "📊 Dashboard"])
 
@@ -211,11 +248,9 @@ def build_saas_model(globals_dict: dict, scenario: dict, terminal_method: str):
     n = int(globals_dict["projection_years"])
     years = [f"Year {i+1}" for i in range(n)]
 
-    # Base
     customers_beg = float(globals_dict["base_customers"])
     arpa = float(globals_dict["base_arpa"])
 
-    # Scenario series
     new_cust_growth = np.array(ensure_len(scenario["new_cust_growth_pct"], n, fill=0.0), dtype=float) / 100.0
     gross_churn = np.array(ensure_len(scenario["gross_churn_pct"], n, fill=0.0), dtype=float) / 100.0
     nrr = np.array(ensure_len(scenario["nrr_pct"], n, fill=100.0), dtype=float) / 100.0
@@ -226,18 +261,17 @@ def build_saas_model(globals_dict: dict, scenario: dict, terminal_method: str):
     rnd_pct = np.array(ensure_len(scenario["rnd_pct_rev"], n, fill=0.0), dtype=float) / 100.0
     ga_pct = np.array(ensure_len(scenario["ga_pct_rev"], n, fill=0.0), dtype=float) / 100.0
 
-    # Globals
-    tax = globals_dict["tax_rate_pct"] / 100.0
-    wacc = globals_dict["wacc_pct"] / 100.0
-    tg = globals_dict["terminal_growth_pct"] / 100.0
-    rev_rec = globals_dict["revenue_recognition_pct_of_arr"] / 100.0
-    da_pct_rev = globals_dict["da_pct_rev"] / 100.0
-    capex_pct_rev = globals_dict["capex_pct_rev"] / 100.0
-    nwc_pct_rev = globals_dict["nwc_pct_rev"] / 100.0
+    tax = float(globals_dict["tax_rate_pct"]) / 100.0
+    wacc = float(globals_dict["wacc_pct"]) / 100.0
+    tg = float(globals_dict["terminal_growth_pct"]) / 100.0
+    rev_rec = float(globals_dict["revenue_recognition_pct_of_arr"]) / 100.0
+    da_pct_rev = float(globals_dict["da_pct_rev"]) / 100.0
+    capex_pct_rev = float(globals_dict["capex_pct_rev"]) / 100.0
+    nwc_pct_rev = float(globals_dict["nwc_pct_rev"]) / 100.0
 
     prev_nwc = 0.0
-
     rows = []
+
     for i in range(n):
         new_customers = customers_beg * new_cust_growth[i]
         churned_customers = customers_beg * gross_churn[i]
@@ -246,7 +280,7 @@ def build_saas_model(globals_dict: dict, scenario: dict, terminal_method: str):
 
         arpa = arpa * (1 + arpa_growth[i])
 
-        # ARR approximation: avg customers * ARPA then apply NRR multiplier (captures net expansion)
+        # ARR approximation (avg customers * ARPA * NRR)
         arr = customers_avg * arpa * nrr[i]
         revenue = arr * rev_rec
 
@@ -256,8 +290,7 @@ def build_saas_model(globals_dict: dict, scenario: dict, terminal_method: str):
         sm = revenue * sm_pct[i]
         rnd = revenue * rnd_pct[i]
         ga = revenue * ga_pct[i]
-
-        cac_spend = new_customers * cac[i]  # info line (not double-counted)
+        cac_spend = new_customers * cac[i]  # info only
 
         ebitda = gross_profit - sm - rnd - ga
 
@@ -301,12 +334,10 @@ def build_saas_model(globals_dict: dict, scenario: dict, terminal_method: str):
     df["Gross Margin (%)"] = np.where(df["Revenue"] > 0, (df["Gross Profit"] / df["Revenue"]) * 100, np.nan)
     df["EBITDA Margin (%)"] = np.where(df["Revenue"] > 0, (df["EBITDA"] / df["Revenue"]) * 100, np.nan)
 
-    # Discounting
     discount_factors = np.array([1 / ((1 + wacc) ** (i + 1)) for i in range(n)], dtype=float)
     df["Discount Factor"] = discount_factors
     df["PV of FCF"] = df["FCF"].values * discount_factors
 
-    # Terminal
     if terminal_method == "Gordon Growth":
         tv = np.nan if wacc <= tg else (df["FCF"].iloc[-1] * (1 + tg) / (wacc - tg))
     else:
@@ -336,62 +367,60 @@ def build_saas_model(globals_dict: dict, scenario: dict, terminal_method: str):
 with tab_assump:
     st.subheader("🧾 Assumptions (All inputs are here)")
 
-    # --- Global assumptions editor ---
-    st.markdown("### Global Assumptions")
+    # Always re-merge defaults before rendering fields (prevents KeyError)
+    st.session_state["globals"] = merge_defaults(DEFAULT_GLOBALS, st.session_state.get("globals", {}))
     g = st.session_state["globals"]
+
+    st.markdown("### Global Assumptions")
 
     c1, c2, c3, c4 = st.columns(4)
     with c1:
-        g["projection_years"] = int(st.number_input("Projection Years", min_value=3, max_value=10, value=int(g["projection_years"]), step=1))
-        g["tax_rate_pct"] = float(st.number_input("Tax Rate (%)", value=float(g["tax_rate_pct"]), step=0.5))
-        g["wacc_pct"] = float(st.number_input("WACC (%)", value=float(g["wacc_pct"]), step=0.5))
+        g["projection_years"] = int(st.number_input("Projection Years", min_value=3, max_value=10, value=int(g.get("projection_years", 5)), step=1))
+        g["tax_rate_pct"] = float(st.number_input("Tax Rate (%)", value=float(g.get("tax_rate_pct", 25.0)), step=0.5))
+        g["wacc_pct"] = float(st.number_input("WACC (%)", value=float(g.get("wacc_pct", 12.0)), step=0.5))
     with c2:
-        g["terminal_growth_pct"] = float(st.number_input("Terminal Growth (%)", value=float(g["terminal_growth_pct"]), step=0.25))
-        g["revenue_recognition_pct_of_arr"] = float(st.number_input("Revenue Recognition (% of ARR)", value=float(g["revenue_recognition_pct_of_arr"]), step=5.0))
-        g["exit_multiple_ev_rev"] = float(st.number_input("Exit Multiple (EV/Revenue)", value=float(g["exit_multiple_ev_rev"]), step=0.5))
+        g["terminal_growth_pct"] = float(st.number_input("Terminal Growth (%)", value=float(g.get("terminal_growth_pct", 4.0)), step=0.25))
+        g["revenue_recognition_pct_of_arr"] = float(st.number_input("Revenue Recognition (% of ARR)", value=float(g.get("revenue_recognition_pct_of_arr", 100.0)), step=5.0))
+        g["exit_multiple_ev_rev"] = float(st.number_input("Exit Multiple (EV/Revenue)", value=float(g.get("exit_multiple_ev_rev", 6.0)), step=0.5))
     with c3:
-        g["da_pct_rev"] = float(st.number_input("D&A (% of Revenue)", value=float(g["da_pct_rev"]), step=0.25))
-        g["capex_pct_rev"] = float(st.number_input("Capex (% of Revenue)", value=float(g["capex_pct_rev"]), step=0.25))
-        g["nwc_pct_rev"] = float(st.number_input("NWC (% of Revenue)", value=float(g["nwc_pct_rev"]), step=0.25))
+        g["da_pct_rev"] = float(st.number_input("D&A (% of Revenue)", value=float(g.get("da_pct_rev", 3.0)), step=0.25))
+        g["capex_pct_rev"] = float(st.number_input("Capex (% of Revenue)", value=float(g.get("capex_pct_rev", 4.0)), step=0.25))
+        g["nwc_pct_rev"] = float(st.number_input("NWC (% of Revenue)", value=float(g.get("nwc_pct_rev", 3.0)), step=0.25))
     with c4:
-        g["net_debt"] = float(st.number_input("Net Debt", value=float(g["net_debt"]), step=100.0))
-        g["cash"] = float(st.number_input("Cash", value=float(g["cash"]), step=100.0))
-        g["base_customers"] = float(st.number_input("Starting Customers", value=float(g["base_customers"]), step=10.0))
-        g["base_arpa"] = float(st.number_input("Starting ARPA (Annual $/Customer)", value=float(g["base_arpa"]), step=250.0))
+        g["net_debt"] = float(st.number_input("Net Debt", value=float(g.get("net_debt", 0.0)), step=100.0))
+        g["cash"] = float(st.number_input("Cash", value=float(g.get("cash", 0.0)), step=100.0))
+        g["base_customers"] = float(st.number_input("Starting Customers", value=float(g.get("base_customers", 200.0)), step=10.0))
+        g["base_arpa"] = float(st.number_input("Starting ARPA (Annual $/Customer)", value=float(g.get("base_arpa", 6000.0)), step=250.0))
 
     st.session_state["globals"] = g
 
-    # Terminal method control
     st.markdown("### Terminal Value Method")
     st.session_state["terminal_method"] = st.radio(
         "Choose terminal method",
         ["Gordon Growth", "Exit Multiple (EV/Revenue)"],
         horizontal=True,
-        index=0 if st.session_state["terminal_method"] == "Gordon Growth" else 1
+        index=0 if st.session_state.get("terminal_method", "Gordon Growth") == "Gordon Growth" else 1
     )
 
-    # Validate
     if st.session_state["terminal_method"] == "Gordon Growth" and (g["wacc_pct"] / 100.0) <= (g["terminal_growth_pct"] / 100.0):
         st.error("❗ WACC must be greater than Terminal Growth for Gordon Growth terminal value.")
 
     st.divider()
 
-    # --- Scenario editing ---
     st.markdown("### Scenario Assumptions (Year-wise)")
     st.session_state["selected_scenario"] = st.radio(
         "Select scenario to edit / run",
         ["Bear", "Base", "Bull"],
         horizontal=True,
-        index=["Bear", "Base", "Bull"].index(st.session_state["selected_scenario"]),
+        index=["Bear", "Base", "Bull"].index(st.session_state.get("selected_scenario", "Base")),
     )
     selected_scn = st.session_state["selected_scenario"]
 
-    # Ensure arrays match projection years
+    # Normalize scenarios to current projection years (fixes old session data)
     n = int(st.session_state["globals"]["projection_years"])
-    years_labels = [f"Year {i+1}" for i in range(n)]
-    for k in SCN_KEYS:
-        st.session_state["scenarios"][selected_scn][k] = ensure_len(st.session_state["scenarios"][selected_scn][k], n, fill=None)
+    st.session_state["scenarios"] = normalize_scenarios(st.session_state.get("scenarios", {}), n)
 
+    years_labels = [f"Year {i+1}" for i in range(n)]
     edit_df = pd.DataFrame({
         "Year": years_labels,
         "New Cust Growth (%)": st.session_state["scenarios"][selected_scn]["new_cust_growth_pct"],
@@ -428,9 +457,7 @@ with tab_assump:
 
     st.divider()
 
-    # Save / Load JSON
     st.markdown("### Save / Load Assumptions (JSON)")
-
     payload = {
         "globals": st.session_state["globals"],
         "scenarios": st.session_state["scenarios"],
@@ -445,8 +472,10 @@ with tab_assump:
         try:
             loaded = json.load(uploaded_json)
             if isinstance(loaded, dict) and "globals" in loaded and "scenarios" in loaded:
-                st.session_state["globals"] = loaded["globals"]
-                st.session_state["scenarios"] = loaded["scenarios"]
+                st.session_state["globals"] = merge_defaults(DEFAULT_GLOBALS, loaded["globals"])
+                # normalize scenarios to current projection years after load
+                n_loaded = int(st.session_state["globals"]["projection_years"])
+                st.session_state["scenarios"] = normalize_scenarios(loaded["scenarios"], n_loaded)
                 st.session_state["terminal_method"] = loaded.get("terminal_method", "Gordon Growth")
                 st.session_state["selected_scenario"] = loaded.get("selected_scenario", "Base")
                 st.success("Loaded assumptions. Refreshing…")
@@ -469,15 +498,12 @@ with tab_assump:
 # =================================================
 # Compute model once per rerun using selected scenario
 # =================================================
-globals_dict = st.session_state["globals"]
-selected = st.session_state["selected_scenario"]
-terminal_method = st.session_state["terminal_method"]
+globals_dict = merge_defaults(DEFAULT_GLOBALS, st.session_state.get("globals", {}))
+terminal_method = st.session_state.get("terminal_method", "Gordon Growth")
+selected = st.session_state.get("selected_scenario", "Base")
 
-# Ensure scenario arrays match years
 n = int(globals_dict["projection_years"])
-for scn_name in ["Bear", "Base", "Bull"]:
-    for k in SCN_KEYS:
-        st.session_state["scenarios"][scn_name][k] = ensure_len(st.session_state["scenarios"][scn_name][k], n, fill=None)
+st.session_state["scenarios"] = normalize_scenarios(st.session_state.get("scenarios", {}), n)
 
 result = build_saas_model(globals_dict, st.session_state["scenarios"][selected], terminal_method)
 df = result["df"]
@@ -494,7 +520,6 @@ all_results = {
 with tab_model:
     st.subheader(f"📑 Financial Model – {selected} Scenario")
 
-    # Operating Drivers
     drivers = pd.DataFrame({"Line Item": [
         "Customers (Beg)",
         "New Customers",
@@ -506,7 +531,7 @@ with tab_model:
         "Gross Margin (%)",
         "EBITDA Margin (%)"
     ]})
-    for i, y in enumerate(years):
+    for y in years:
         drivers[y] = [
             fmt_float2(df.loc[y, "Customers (Beg)"]),
             fmt_float2(df.loc[y, "New Customers"]),
@@ -520,7 +545,6 @@ with tab_model:
         ]
     show_table(drivers, "🧭 SaaS Operating Drivers")
 
-    # P&L
     pnl = pd.DataFrame({"Line Item": [
         "Revenue",
         "COGS",
@@ -550,7 +574,6 @@ with tab_model:
         ]
     show_table(pnl, "📑 Profit & Loss Statement")
 
-    # Cash Flow
     cf = pd.DataFrame({"Line Item": [
         "NOPAT",
         "Add: D&A",
@@ -568,7 +591,6 @@ with tab_model:
         ]
     show_table(cf, "💵 Cash Flow (FCF Build)")
 
-    # DCF detail
     dcf = pd.DataFrame({"Line Item": ["FCF", "Discount Factor", "PV of FCF"]})
     for y in years:
         dcf[y] = [
@@ -578,7 +600,6 @@ with tab_model:
         ]
     show_table(dcf, "💰 DCF (Detailed)")
 
-    # Valuation summary
     tv_rows = [
         ("Terminal Method", terminal_method),
         ("Final Year Revenue", fmt_currency(df["Revenue"].iloc[-1])),
@@ -596,7 +617,6 @@ with tab_model:
     ]
     show_table(pd.DataFrame(tv_rows, columns=["Line Item", "Amount"]), "📘 Valuation Summary")
 
-    # Export Excel
     st.subheader("⬇️ Export Excel")
 
     def to_excel_bytes():
@@ -623,7 +643,6 @@ with tab_model:
 
             df.to_excel(writer, sheet_name="Model", index=True)
 
-            # Statements
             pnl_num = df[["Revenue", "COGS", "Gross Profit", "Sales & Marketing", "R&D", "G&A", "EBITDA", "EBIT", "NOPAT"]].copy()
             pnl_num.to_excel(writer, sheet_name="PnL", index=True)
 
@@ -648,7 +667,6 @@ with tab_model:
 with tab_dash:
     st.subheader(f"📊 Dashboard – {selected} Scenario")
 
-    # KPI cards
     k1, k2, k3, k4, k5 = st.columns(5)
     rev0 = float(df["Revenue"].iloc[0])
     revn = float(df["Revenue"].iloc[-1])
@@ -669,11 +687,9 @@ with tab_dash:
     })
     show_table(comp)
 
-    # Revenue & New customer growth
     st.markdown("### Revenue & New Customer Growth (%)")
     scn = st.session_state["scenarios"][selected]
     new_growth = np.array(ensure_len(scn["new_cust_growth_pct"], n, fill=0.0), dtype=float)
-
     st.pyplot(dual_axis_line_chart(
         title="Revenue vs New Customer Growth",
         x_labels=years,
@@ -686,7 +702,6 @@ with tab_dash:
         right_is_pct=True,
     ))
 
-    # EBITDA & EBITDA margin
     st.markdown("### EBITDA & EBITDA Margin (%)")
     st.pyplot(dual_axis_line_chart(
         title="EBITDA vs EBITDA Margin",
@@ -700,7 +715,6 @@ with tab_dash:
         right_is_pct=True,
     ))
 
-    # NOPAT
     st.markdown("### NOPAT")
     fig, ax = plt.subplots()
     x_pos = np.arange(len(years))
@@ -714,7 +728,6 @@ with tab_dash:
     fig.tight_layout()
     st.pyplot(fig)
 
-    # FCF
     st.markdown("### Free Cash Flow (FCF)")
     fig, ax = plt.subplots()
     ax.plot(x_pos, df["FCF"].values, marker="o", color="#8c564b", label="FCF")
