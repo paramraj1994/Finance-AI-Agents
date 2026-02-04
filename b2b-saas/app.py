@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 # =================================================
 st.set_page_config(page_title="B2B SaaS Model – Investor Suite", layout="wide")
 st.title("🧩 B2B SaaS Financial Model – Investor Suite")
-st.caption("Assumptions • Financial Model • Dashboards • Sensitivity • DCF • Export • Audit")
+st.caption("Assumptions • Financial Model • Dashboard • DCF • Export • Audit")
 
 # =================================================
 # CSS (center align tables)
@@ -91,13 +91,10 @@ def add_point_labels(ax, x_pos, y_vals, is_pct=False):
             ha="center", va=va, fontsize=9, clip_on=True
         )
 
-def dual_axis_line_chart(
-    title, x_labels, y_left, y_right,
-    left_label, right_label,
-    left_color, right_color,
-    right_is_pct=True,
-    rotate=0
-):
+def dual_axis_line_chart(title, x_labels, y_left, y_right,
+                         left_label, right_label,
+                         left_color, right_color,
+                         right_is_pct=True):
     fig, ax1 = plt.subplots()
     ax2 = ax1.twinx()
     x_pos = np.arange(len(x_labels))
@@ -106,7 +103,7 @@ def dual_axis_line_chart(
     ax2.plot(x_pos, y_right, marker="o", linestyle="--", color=right_color, label=right_label)
 
     ax1.set_xticks(x_pos)
-    ax1.set_xticklabels(x_labels, rotation=rotate, ha="right" if rotate else "center")
+    ax1.set_xticklabels(x_labels)
     ax1.set_ylabel(left_label)
     ax2.set_ylabel(right_label)
     ax1.grid(False)
@@ -194,68 +191,6 @@ def audit_selector_ui(audit_store: dict, default_table="PnL", default_item="EBIT
     show_audit_panel(audit_store, table, item, period)
 
 # =================================================
-# Monthly aggregation utilities (fix messy dashboard)
-# =================================================
-def _month_num(idx_label: str) -> int:
-    # "Month 12" -> 12 ; "Year 2" -> 2*12 fallback
-    try:
-        n = int(str(idx_label).split()[-1])
-        return n
-    except Exception:
-        return 1
-
-def aggregate_monthly_to_quarterly(df_m: pd.DataFrame) -> pd.DataFrame:
-    df = df_m.copy()
-    df["__m"] = [ _month_num(i) for i in df.index ]
-    df["Quarter"] = ((df["__m"] - 1) // 3) + 1
-    df["Year"] = ((df["__m"] - 1) // 12) + 1
-    df["Period"] = df["Year"].astype(int).astype(str).radd("Y") + " Q" + df["Quarter"].astype(int).astype(str)
-    return _aggregate(df, group_col="Period")
-
-def aggregate_monthly_to_annual(df_m: pd.DataFrame) -> pd.DataFrame:
-    df = df_m.copy()
-    df["__m"] = [ _month_num(i) for i in df.index ]
-    df["Year"] = ((df["__m"] - 1) // 12) + 1
-    df["Period"] = df["Year"].astype(int).astype(str).radd("Year ")
-    return _aggregate(df, group_col="Period")
-
-def _aggregate(df: pd.DataFrame, group_col: str) -> pd.DataFrame:
-    """
-    Sums for flow items, end-of-period for stock where appropriate,
-    averages for % and some per-customer metrics.
-    """
-    flow_sum = [
-        "New Customers","Churned Customers","Net Adds",
-        "Revenue","COGS","Gross Profit",
-        "Sales & Marketing (Total)","Brand Marketing","Acquisition (Total)","CAC Spend","Acquisition Other",
-        "R&D","G&A","EBITDA","D&A","EBIT","NOPAT","Capex","ΔNWC","FCF","PV of FCF"
-    ]
-    stock_last = ["Customers (End)","ARR"]
-    stock_first = ["Customers (Beg)"]
-    avg_cols = ["ARPA","CAC Payback (months)","Discount Factor","Gross Margin (%)","EBITDA Margin (%)"]
-
-    existing = set(df.columns)
-
-    agg_dict = {}
-    for c in flow_sum:
-        if c in existing: agg_dict[c] = "sum"
-    for c in stock_last:
-        if c in existing: agg_dict[c] = "last"
-    for c in stock_first:
-        if c in existing: agg_dict[c] = "first"
-    for c in avg_cols:
-        if c in existing: agg_dict[c] = "mean"
-
-    out = df.groupby(group_col).agg(agg_dict)
-    out.index.name = None
-    return out
-
-def compute_growth(series: pd.Series) -> pd.Series:
-    s = pd.Series(series).astype(float)
-    g = s.pct_change() * 100.0
-    return g
-
-# =================================================
 # Defaults
 # =================================================
 DEFAULT_GLOBALS = {
@@ -332,6 +267,10 @@ def normalize_scenarios_annual(scenarios_obj: dict | None, years: int) -> dict:
     return out
 
 def normalize_scenarios_monthly(scenarios_obj: dict | None, months: int) -> dict:
+    """
+    Monthly scenario store is expected to already be month-wise.
+    If missing, we initialize month-wise arrays by repeating the first annual default values.
+    """
     out = {}
     for name in ["Bear", "Base", "Bull"]:
         incoming = scenarios_obj.get(name, {}) if isinstance(scenarios_obj, dict) else {}
@@ -341,6 +280,7 @@ def normalize_scenarios_monthly(scenarios_obj: dict | None, months: int) -> dict
             if isinstance(arr, list) and len(arr) > 0:
                 base[k] = ensure_len(arr, months, fill=arr[-1])
             else:
+                # fallback: take annual default first year value and repeat
                 annual_default = DEFAULT_SCENARIOS[name].get(k, [0.0])
                 seed = float(annual_default[0]) if annual_default else 0.0
                 base[k] = [seed] * months
@@ -359,7 +299,7 @@ if "scenarios_annual" not in st.session_state:
     st.session_state["scenarios_annual"] = json.loads(json.dumps(DEFAULT_SCENARIOS))
 
 if "scenarios_monthly" not in st.session_state:
-    st.session_state["scenarios_monthly"] = {}
+    st.session_state["scenarios_monthly"] = {}  # created lazily
 
 if "terminal_method" not in st.session_state:
     st.session_state["terminal_method"] = "Gordon Growth"
@@ -370,12 +310,12 @@ if "selected_scenario" not in st.session_state:
 # =================================================
 # Tabs
 # =================================================
-tab_assump, tab_model, tab_dash, tab_metrics, tab_sens, tab_audit = st.tabs(
-    ["🧾 Assumptions", "📑 Financial Model", "📊 Dashboard", "📈 Metrics Dashboard", "📌 Sensitivity", "🔍 Audit"]
+tab_assump, tab_model, tab_dash, tab_audit = st.tabs(
+    ["🧾 Assumptions", "📑 Financial Model", "📊 Dashboard", "🔍 Audit"]
 )
 
 # =================================================
-# Model Builder
+# Model Builder (uses annual or monthly assumptions based on toggle)
 # =================================================
 def build_saas_model(globals_dict: dict, scenario_annual: dict, scenario_monthly: dict | None, terminal_method: str):
     n_years = int(globals_dict["projection_years"])
@@ -384,11 +324,12 @@ def build_saas_model(globals_dict: dict, scenario_annual: dict, scenario_monthly
     if reporting == "Monthly":
         n = n_years * 12
         periods = [f"Month {i+1}" for i in range(n)]
+        # use monthly store (must exist by now)
         scn = scenario_monthly
-
+        # interpret monthly inputs directly:
         new_cust_growth = np.array(ensure_len(scn["new_cust_growth_pct"], n, fill=0.0), dtype=float) / 100.0
         gross_churn     = np.array(ensure_len(scn["gross_churn_pct"], n, fill=0.0), dtype=float) / 100.0
-        nrr_mult        = np.array(ensure_len(scn["nrr_pct"], n, fill=100.0), dtype=float) / 100.0
+        nrr_mult        = np.array(ensure_len(scn["nrr_pct"], n, fill=100.0), dtype=float) / 100.0  # monthly multiplier in %
         arpa_growth     = np.array(ensure_len(scn["arpa_growth_pct"], n, fill=0.0), dtype=float) / 100.0
 
         gm              = np.array(ensure_len(scn["gross_margin_pct"], n, fill=75.0), dtype=float) / 100.0
@@ -400,7 +341,6 @@ def build_saas_model(globals_dict: dict, scenario_annual: dict, scenario_monthly
         n = n_years
         periods = [f"Year {i+1}" for i in range(n)]
         scn = scenario_annual
-
         new_cust_growth = np.array(ensure_len(scn["new_cust_growth_pct"], n, fill=0.0), dtype=float) / 100.0
         gross_churn     = np.array(ensure_len(scn["gross_churn_pct"], n, fill=0.0), dtype=float) / 100.0
         nrr_mult        = np.array(ensure_len(scn["nrr_pct"], n, fill=100.0), dtype=float) / 100.0
@@ -412,6 +352,7 @@ def build_saas_model(globals_dict: dict, scenario_annual: dict, scenario_monthly
         ga_pct          = np.array(ensure_len(scn["ga_pct_rev"], n, fill=0.0), dtype=float) / 100.0
         cac_per_new     = np.array(ensure_len(scn["cac_per_new"], n, fill=0.0), dtype=float)
 
+    # globals
     tax_annual = float(globals_dict["tax_rate_pct"]) / 100.0
     wacc_annual = float(globals_dict["wacc_pct"]) / 100.0
     tg_annual = float(globals_dict["terminal_growth_pct"]) / 100.0
@@ -425,12 +366,14 @@ def build_saas_model(globals_dict: dict, scenario_annual: dict, scenario_monthly
     brand_share = min(max(brand_share, 0.0), 1.0)
 
     customers_beg = float(globals_dict["base_customers"])
-    arpa = float(globals_dict["base_arpa"])  # annual per customer
+    arpa_annual = float(globals_dict["base_arpa"])  # annual $ per customer
+    arpa = arpa_annual
 
+    # discount rates
     if reporting == "Monthly":
         wacc = (1 + wacc_annual) ** (1/12) - 1
         tg = (1 + tg_annual) ** (1/12) - 1
-        tax = tax_annual / 12.0
+        tax = tax_annual / 12.0  # simple monthly allocation
     else:
         wacc = wacc_annual
         tg = tg_annual
@@ -451,7 +394,12 @@ def build_saas_model(globals_dict: dict, scenario_annual: dict, scenario_monthly
 
         arpa = arpa * (1 + arpa_growth[i])
 
+        # ARR annualized
         arr = customers_avg * arpa * nrr_mult[i]
+
+        # revenue recognition:
+        # Annual: Revenue = ARR × rev_rec
+        # Monthly: Revenue = (ARR / 12) × rev_rec
         revenue = (arr * rev_rec) if reporting == "Annual" else (arr * rev_rec / 12.0)
 
         gross_profit = revenue * gm[i]
@@ -495,7 +443,7 @@ def build_saas_model(globals_dict: dict, scenario_annual: dict, scenario_monthly
             capex_val, delta_nwc, fcf,
         ])
 
-        # audit (core)
+        # audit (key metrics)
         audit[audit_key("Drivers", "Revenue", period)] = audit_pack(
             "Revenue = ARR × Revenue Recognition" + (" / 12 (monthly)" if reporting == "Monthly" else ""),
             [("ARR", arr), ("Revenue Recognition", f"{rev_rec*100:.2f}%"), ("Divide by 12?", "Yes" if reporting == "Monthly" else "No")],
@@ -533,24 +481,41 @@ def build_saas_model(globals_dict: dict, scenario_annual: dict, scenario_monthly
     df["Discount Factor"] = discount_factors
     df["PV of FCF"] = df["FCF"].values * discount_factors
 
+    # terminal value based on last period
     last_period = periods[-1]
-
     if terminal_method == "Gordon Growth":
         if wacc <= tg:
             tv = np.nan
+            tv_formula = "TV invalid: discount rate must be greater than terminal growth"
+            tv_components = [("r", f"{wacc*100:.2f}%"), ("g", f"{tg*100:.2f}%")]
         else:
             fcf_last = float(df["FCF"].iloc[-1])
             tv = fcf_last * (1 + tg) / (wacc - tg)
+            tv_formula = "TV (Gordon) = FCF_last × (1 + g) / (r − g)"
+            tv_components = [("FCF_last", fcf_last), ("g", f"{tg*100:.2f}%"), ("r", f"{wacc*100:.2f}%")]
     else:
         revenue_last = float(df["Revenue"].iloc[-1])
         revenue_for_tv = revenue_last * (12.0 if reporting == "Monthly" else 1.0)
         tv = revenue_for_tv * float(globals_dict["exit_multiple_ev_rev"])
+        tv_formula = "TV (Exit Multiple) = Revenue_last(annualized) × Exit Multiple"
+        tv_components = [("Revenue_last (annualized)", revenue_for_tv), ("Exit Multiple", float(globals_dict["exit_multiple_ev_rev"]))]
 
     pv_tv = tv * discount_factors[-1] if np.isfinite(tv) else np.nan
     pv_explicit = float(np.nansum(df["PV of FCF"].values))
     ev = pv_explicit + (float(pv_tv) if np.isfinite(pv_tv) else 0.0)
+
     equity_value = ev - float(globals_dict["net_debt"]) + float(globals_dict["cash"])
     tv_share = (pv_tv / ev) if ev != 0 and np.isfinite(pv_tv) else np.nan
+
+    audit[audit_key("Valuation", "Terminal Value", last_period)] = audit_pack(tv_formula, tv_components)
+    audit[audit_key("Valuation", "Enterprise Value", last_period)] = audit_pack(
+        "EV = PV Explicit FCFs + PV(TV)",
+        [("PV Explicit", pv_explicit), ("PV(TV)", float(pv_tv) if np.isfinite(pv_tv) else "NA")],
+    )
+    audit[audit_key("Valuation", "Equity Value", last_period)] = audit_pack(
+        "Equity Value = EV − Net Debt + Cash",
+        [("EV", ev), ("Net Debt", float(globals_dict["net_debt"])), ("Cash", float(globals_dict["cash"]))],
+    )
 
     return {
         "periods": periods,
@@ -563,13 +528,10 @@ def build_saas_model(globals_dict: dict, scenario_annual: dict, scenario_monthly
         "equity_value": equity_value,
         "terminal_share": tv_share,
         "reporting_period": reporting,
-        "wacc_period": wacc,
-        "tg_period": tg,
-        "last_period": last_period,
     }
 
 # =================================================
-# ASSUMPTIONS TAB
+# ASSUMPTIONS TAB (Annual editor OR Monthly editor)
 # =================================================
 with tab_assump:
     st.subheader("🧾 Assumptions")
@@ -582,7 +544,7 @@ with tab_assump:
         ["Annual", "Monthly"],
         horizontal=True,
         index=0 if g.get("reporting_period", "Annual") == "Annual" else 1,
-        help="Annual shows Year 1..N. Monthly shows Month 1..(N×12) and lets you edit month-wise assumptions."
+        help="Annual shows Year 1..N. Monthly shows Month 1..(N×12) and lets you edit month-wise assumptions directly."
     )
 
     c1, c2, c3, c4 = st.columns(4)
@@ -610,7 +572,7 @@ with tab_assump:
     )
     st.session_state["globals"] = g
 
-    st.markdown("### Terminal Method (used in main valuation summary)")
+    st.markdown("### Terminal Method")
     st.session_state["terminal_method"] = st.radio(
         "Choose terminal method",
         ["Gordon Growth", "Exit Multiple (EV/Revenue)"],
@@ -618,6 +580,7 @@ with tab_assump:
         index=0 if st.session_state.get("terminal_method", "Gordon Growth") == "Gordon Growth" else 1
     )
 
+    # scenario selection
     st.divider()
     st.markdown("### Scenario Assumptions")
     st.session_state["selected_scenario"] = st.radio(
@@ -631,11 +594,17 @@ with tab_assump:
     n_years = int(g["projection_years"])
     reporting = g["reporting_period"]
 
+    # normalize stores
     st.session_state["scenarios_annual"] = normalize_scenarios_annual(st.session_state.get("scenarios_annual", {}), n_years)
 
     if reporting == "Monthly":
         n_months = n_years * 12
         st.session_state["scenarios_monthly"] = normalize_scenarios_monthly(st.session_state.get("scenarios_monthly", {}), n_months)
+
+        st.caption(
+            "Monthly editor: inputs are interpreted **per month**. "
+            "Example: NRR 100.50 means monthly multiplier 1.005."
+        )
 
         months_labels = [f"Month {i+1}" for i in range(n_months)]
         edit_df = pd.DataFrame({
@@ -651,7 +620,6 @@ with tab_assump:
             "G&A (% Rev)": st.session_state["scenarios_monthly"][selected_scn]["ga_pct_rev"],
         })
 
-        st.caption("Monthly editor (per month). NRR is a monthly multiplier in % (e.g., 100.50 = 1.005).")
         edited = st.data_editor(edit_df, hide_index=True, disabled=["Month"], use_container_width=True)
 
         col_map = {
@@ -672,6 +640,22 @@ with tab_assump:
                 st.session_state["scenarios_monthly"][selected_scn][key] = ensure_len(values, n_months, fill=0.0)
             st.success(f"{selected_scn} monthly scenario saved.")
 
+        with st.expander("🔁 Optional: Initialize Monthly from Annual (repeat each year into 12 months)"):
+            st.caption("This will overwrite your monthly inputs for the selected scenario.")
+            if st.button("Build Monthly Inputs from Annual for this Scenario"):
+                annual = st.session_state["scenarios_annual"][selected_scn]
+                n_months = n_years * 12
+                out = {}
+                for k in SCN_KEYS:
+                    yr_vals = ensure_len(annual.get(k, []), n_years, fill=0.0)
+                    out[k] = []
+                    for y in range(n_years):
+                        out[k].extend([float(yr_vals[y] if yr_vals[y] is not None else 0.0)] * 12)
+                    out[k] = ensure_len(out[k], n_months, fill=out[k][-1] if out[k] else 0.0)
+                st.session_state["scenarios_monthly"][selected_scn] = out
+                st.success("Monthly inputs initialized from annual. Refreshing…")
+                st.rerun()
+
     else:
         years_labels = [f"Year {i+1}" for i in range(n_years)]
         edit_df = pd.DataFrame({
@@ -687,7 +671,7 @@ with tab_assump:
             "G&A (% Rev)": st.session_state["scenarios_annual"][selected_scn]["ga_pct_rev"],
         })
 
-        st.caption("Annual editor (per year).")
+        st.caption("Annual editor: values are interpreted per year.")
         edited = st.data_editor(edit_df, hide_index=True, disabled=["Year"], use_container_width=True)
 
         col_map = {
@@ -715,12 +699,11 @@ globals_dict = merge_defaults(DEFAULT_GLOBALS, st.session_state.get("globals", {
 terminal_method = st.session_state.get("terminal_method", "Gordon Growth")
 selected = st.session_state.get("selected_scenario", "Base")
 n_years = int(globals_dict["projection_years"])
-reporting = globals_dict.get("reporting_period", "Annual")
 
 scenarios_annual = normalize_scenarios_annual(st.session_state.get("scenarios_annual", {}), n_years)
 
 scenario_monthly = None
-if reporting == "Monthly":
+if globals_dict.get("reporting_period") == "Monthly":
     n_months = n_years * 12
     st.session_state["scenarios_monthly"] = normalize_scenarios_monthly(st.session_state.get("scenarios_monthly", {}), n_months)
     scenario_monthly = st.session_state["scenarios_monthly"][selected]
@@ -729,6 +712,7 @@ result = build_saas_model(globals_dict, scenarios_annual[selected], scenario_mon
 df = result["df"]
 periods = result["periods"]
 audit_store = result["audit"]
+reporting = result["reporting_period"]
 
 # =================================================
 # FINANCIAL MODEL TAB
@@ -740,9 +724,10 @@ with tab_model:
         default_period = periods[0] if periods else None
         audit_selector_ui(audit_store, default_table="PnL", default_item="EBITDA", default_period=default_period, key_prefix="fm_audit")
 
-    sub_pnl, sub_cf, sub_val = st.tabs(["📑 P&L", "💵 Cash Flow", "📘 Valuation"])
+    sub_core, sub_acq, sub_mkt = st.tabs(["📑 Core Statements", "👥 Subscriber Acquisition", "📣 Marketing Spend"])
 
-    with sub_pnl:
+    with sub_core:
+        st.subheader("📑 Profit & Loss")
         pnl = pd.DataFrame({"Line Item": [
             "Revenue", "COGS", "Gross Profit",
             "Sales & Marketing (Total)", "R&D", "G&A",
@@ -763,7 +748,7 @@ with tab_model:
             ]
         st.dataframe(pnl, hide_index=True, use_container_width=True)
 
-    with sub_cf:
+        st.subheader("💵 Cash Flow")
         cf = pd.DataFrame({"Line Item": ["NOPAT", "D&A", "Capex", "ΔNWC", "FCF"]})
         for p in periods:
             cf[p] = [
@@ -775,7 +760,7 @@ with tab_model:
             ]
         st.dataframe(cf, hide_index=True, use_container_width=True)
 
-    with sub_val:
+        st.subheader("📘 Valuation Summary")
         last_p = periods[-1]
         val = pd.DataFrame({
             "Line Item": ["Terminal Value", "PV of Terminal Value", "PV of Explicit FCFs", "Enterprise Value", "Equity Value"],
@@ -789,128 +774,75 @@ with tab_model:
         })
         st.dataframe(val, hide_index=True, use_container_width=True)
 
+    with sub_acq:
+        st.subheader("👥 Subscriber Acquisition")
+        acq = pd.DataFrame({"Line Item": [
+            "Customers (Beg)", "New Customers", "Churned Customers", "Net Adds", "Customers (End)",
+            "CAC Spend", "CAC Payback (months)"
+        ]})
+        for p in periods:
+            acq[p] = [
+                fmt_float2(df.loc[p, "Customers (Beg)"]),
+                fmt_float2(df.loc[p, "New Customers"]),
+                fmt_float2(df.loc[p, "Churned Customers"]),
+                fmt_float2(df.loc[p, "Net Adds"]),
+                fmt_float2(df.loc[p, "Customers (End)"]),
+                fmt_currency(df.loc[p, "CAC Spend"]),
+                fmt_float2(df.loc[p, "CAC Payback (months)"]) if np.isfinite(df.loc[p, "CAC Payback (months)"]) else "",
+            ]
+        st.dataframe(acq, hide_index=True, use_container_width=True)
+
+    with sub_mkt:
+        st.subheader("📣 Marketing Spend")
+        mkt = pd.DataFrame({"Line Item": [
+            "Sales & Marketing (Total)", "Brand Marketing", "CAC Spend", "Acquisition Other", "Acquisition (Total)"
+        ]})
+        for p in periods:
+            mkt[p] = [
+                fmt_currency(df.loc[p, "Sales & Marketing (Total)"]),
+                fmt_currency(df.loc[p, "Brand Marketing"]),
+                fmt_currency(df.loc[p, "CAC Spend"]),
+                fmt_currency(df.loc[p, "Acquisition Other"]),
+                fmt_currency(df.loc[p, "Acquisition (Total)"]),
+            ]
+        st.dataframe(mkt, hide_index=True, use_container_width=True)
+
 # =================================================
-# DASHBOARD (clean view selector for Monthly)
+# DASHBOARD TAB
 # =================================================
 with tab_dash:
     st.subheader(f"📊 Dashboard – {selected} Scenario ({reporting})")
 
-    if reporting == "Monthly":
-        view = st.radio("Dashboard View", ["Monthly (Range)", "Quarterly (Aggregated)", "Annual (Aggregated)"], horizontal=True)
-        if view == "Monthly (Range)":
-            max_m = len(df)
-            start, end = st.slider("Select month range", 1, max_m, (1, min(max_m, 24)))
-            chart_df = df.iloc[start-1:end].copy()
-            x_labels = list(chart_df.index)
-            rotate = 45
-        elif view == "Quarterly (Aggregated)":
-            chart_df = aggregate_monthly_to_quarterly(df)
-            x_labels = list(chart_df.index)
-            rotate = 0
-        else:
-            chart_df = aggregate_monthly_to_annual(df)
-            x_labels = list(chart_df.index)
-            rotate = 0
-    else:
-        chart_df = df.copy()
-        x_labels = list(chart_df.index)
-        rotate = 0
-
-    # KPIs (based on chart_df last)
-    c1, c2, c3, c4, c5 = st.columns(5)
-    with c1:
-        st.metric("Revenue (Last)", fmt_currency(chart_df["Revenue"].iloc[-1]))
-    with c2:
-        st.metric("EBITDA (Last)", fmt_currency(chart_df["EBITDA"].iloc[-1]))
-    with c3:
-        st.metric("EBITDA Margin (Avg)", fmt_pct2(float(pd.Series(chart_df["EBITDA Margin (%)"]).dropna().mean())))
-    with c4:
-        st.metric("FCF (Last)", fmt_currency(chart_df["FCF"].iloc[-1]))
-    with c5:
-        st.metric("Customers (End)", fmt_float2(chart_df["Customers (End)"].iloc[-1]))
-
-    st.divider()
-
-    # Compact summary table (not 60 columns)
-    summary = pd.DataFrame({
-        "Period": x_labels,
-        "Revenue": [fmt_currency(v) for v in chart_df["Revenue"].values],
-        "EBITDA": [fmt_currency(v) for v in chart_df["EBITDA"].values],
-        "EBITDA Margin (%)": [fmt_pct2(v) for v in chart_df["EBITDA Margin (%)"].values],
-        "FCF": [fmt_currency(v) for v in chart_df["FCF"].values],
-        "Customers (End)": [fmt_float2(v) for v in chart_df["Customers (End)"].values],
-    })
-    st.dataframe(summary, hide_index=True, use_container_width=True)
-
-# =================================================
-# METRICS DASHBOARD (the graphs you asked for)
-# =================================================
-with tab_metrics:
-    st.subheader(f"📈 Metrics Dashboard – {selected} Scenario ({reporting})")
-
-    # For charts: if Monthly, default to Quarterly aggregated to avoid mess
-    if reporting == "Monthly":
-        mode = st.radio("Chart Granularity", ["Monthly (Range)", "Quarterly", "Annual"], horizontal=True)
-        if mode == "Monthly (Range)":
-            max_m = len(df)
-            start, end = st.slider("Select month range (charts)", 1, max_m, (1, min(max_m, 24)), key="mrange_charts")
-            dff = df.iloc[start-1:end].copy()
-            x = list(dff.index)
-            rotate = 45
-        elif mode == "Quarterly":
-            dff = aggregate_monthly_to_quarterly(df)
-            x = list(dff.index)
-            rotate = 0
-        else:
-            dff = aggregate_monthly_to_annual(df)
-            x = list(dff.index)
-            rotate = 0
+    # keep charts readable for monthly
+    if reporting == "Monthly" and len(periods) > 24:
+        chart_periods = periods[:24]
+        dff = df.loc[chart_periods].copy()
+        x_labels = chart_periods
+        st.caption("Showing first 24 months for charts (to keep charts readable).")
     else:
         dff = df.copy()
-        x = list(dff.index)
-        rotate = 0
+        x_labels = periods
 
-    # Growth rates (period over period)
-    rev_growth = compute_growth(dff["Revenue"])
-    ebitda_margin = dff["EBITDA Margin (%)"]
-    customers_growth = compute_growth(dff["Customers (End)"])
+    x_pos = np.arange(len(x_labels))
 
-    st.markdown("### Revenue & Revenue Growth (%)")
-    st.pyplot(dual_axis_line_chart(
-        title="Revenue vs Revenue Growth",
-        x_labels=x,
-        y_left=dff["Revenue"].values,
-        y_right=rev_growth.fillna(0.0).values,
-        left_label="Revenue",
-        right_label="Revenue Growth (%)",
-        left_color="#1f77b4",
-        right_color="#ff7f0e",
-        right_is_pct=True,
-        rotate=rotate
-    ))
-
-    st.markdown("### EBITDA & EBITDA Margin (%)")
-    st.pyplot(dual_axis_line_chart(
-        title="EBITDA vs EBITDA Margin",
-        x_labels=x,
-        y_left=dff["EBITDA"].values,
-        y_right=ebitda_margin.fillna(0.0).values,
-        left_label="EBITDA",
-        right_label="EBITDA Margin (%)",
-        left_color="#2ca02c",
-        right_color="#d62728",
-        right_is_pct=True,
-        rotate=rotate
-    ))
-
-    st.markdown("### NOPAT (Profit After Tax proxy)")
+    st.markdown("### Revenue")
     fig, ax = plt.subplots()
-    x_pos = np.arange(len(x))
-    ax.plot(x_pos, dff["NOPAT"].values, marker="o", label="NOPAT")
+    ax.plot(x_pos, dff["Revenue"].values, marker="o", label="Revenue")
     ax.set_xticks(x_pos)
-    ax.set_xticklabels(x, rotation=rotate, ha="right" if rotate else "center")
+    ax.set_xticklabels(x_labels, rotation=45, ha="right")
     ax.grid(False)
-    add_point_labels(ax, x_pos, dff["NOPAT"].values, is_pct=False)
+    add_point_labels(ax, x_pos, dff["Revenue"].values, is_pct=False)
+    ax.legend(loc="best")
+    fig.tight_layout()
+    st.pyplot(fig)
+
+    st.markdown("### EBITDA")
+    fig, ax = plt.subplots()
+    ax.plot(x_pos, dff["EBITDA"].values, marker="o", label="EBITDA")
+    ax.set_xticks(x_pos)
+    ax.set_xticklabels(x_labels, rotation=45, ha="right")
+    ax.grid(False)
+    add_point_labels(ax, x_pos, dff["EBITDA"].values, is_pct=False)
     ax.legend(loc="best")
     fig.tight_layout()
     st.pyplot(fig)
@@ -919,143 +851,12 @@ with tab_metrics:
     fig, ax = plt.subplots()
     ax.plot(x_pos, dff["FCF"].values, marker="o", label="FCF")
     ax.set_xticks(x_pos)
-    ax.set_xticklabels(x, rotation=rotate, ha="right" if rotate else "center")
+    ax.set_xticklabels(x_labels, rotation=45, ha="right")
     ax.grid(False)
     add_point_labels(ax, x_pos, dff["FCF"].values, is_pct=False)
     ax.legend(loc="best")
     fig.tight_layout()
     st.pyplot(fig)
-
-    st.markdown("### Customers (End) & Customer Growth (%)")
-    st.pyplot(dual_axis_line_chart(
-        title="Customers vs Customer Growth",
-        x_labels=x,
-        y_left=dff["Customers (End)"].values,
-        y_right=customers_growth.fillna(0.0).values,
-        left_label="Customers (End)",
-        right_label="Customer Growth (%)",
-        left_color="#9467bd",
-        right_color="#8c564b",
-        right_is_pct=True,
-        rotate=rotate
-    ))
-
-# =================================================
-# SENSITIVITY ANALYSIS TAB
-# =================================================
-def run_model_for_sensitivity(globals_base: dict, scenario_annual: dict, scenario_monthly: dict | None, terminal_method: str,
-                              wacc_pct: float, tg_pct: float, exit_mult: float):
-    g2 = globals_base.copy()
-    g2["wacc_pct"] = float(wacc_pct)
-    g2["terminal_growth_pct"] = float(tg_pct)
-    g2["exit_multiple_ev_rev"] = float(exit_mult)
-    return build_saas_model(g2, scenario_annual, scenario_monthly, terminal_method)
-
-def football_field_chart(values_dict: dict, title: str):
-    """
-    values_dict: {label: (low, mid, high)} shown as horizontal ranges
-    """
-    labels = list(values_dict.keys())
-    lows = np.array([values_dict[k][0] for k in labels], dtype=float)
-    meds = np.array([values_dict[k][1] for k in labels], dtype=float)
-    highs = np.array([values_dict[k][2] for k in labels], dtype=float)
-
-    y = np.arange(len(labels))[::-1]  # top-to-bottom
-    fig, ax = plt.subplots(figsize=(8, max(3, 0.6 * len(labels))))
-
-    for i, lab in enumerate(labels):
-        lo, md, hi = lows[i], meds[i], highs[i]
-        ax.plot([lo, hi], [y[i], y[i]], linewidth=6, solid_capstyle="butt")
-        ax.scatter([md], [y[i]], s=80)
-        ax.text(lo, y[i]+0.12, fmt_currency(lo), ha="left", va="bottom", fontsize=9)
-        ax.text(hi, y[i]+0.12, fmt_currency(hi), ha="right", va="bottom", fontsize=9)
-        ax.text(md, y[i]-0.18, fmt_currency(md), ha="center", va="top", fontsize=9)
-
-    ax.set_yticks(y)
-    ax.set_yticklabels(labels)
-    ax.grid(False)
-    ax.set_title(title)
-    ax.set_xlabel("Enterprise Value")
-    fig.tight_layout()
-    return fig
-
-with tab_sens:
-    st.subheader(f"📌 Sensitivity Analysis – {selected} Scenario ({reporting})")
-    st.caption("All sensitivities are on Enterprise Value (EV). Use grids + football-field chart for summary.")
-
-    colA, colB, colC = st.columns(3)
-    with colA:
-        wacc_min = st.number_input("WACC min (%)", value=max(1.0, float(globals_dict["wacc_pct"]) - 3.0), step=0.5)
-        wacc_max = st.number_input("WACC max (%)", value=float(globals_dict["wacc_pct"]) + 3.0, step=0.5)
-    with colB:
-        tg_min = st.number_input("Terminal Growth min (%)", value=max(0.0, float(globals_dict["terminal_growth_pct"]) - 2.0), step=0.25)
-        tg_max = st.number_input("Terminal Growth max (%)", value=float(globals_dict["terminal_growth_pct"]) + 2.0, step=0.25)
-    with colC:
-        mult_min = st.number_input("Exit Multiple min (EV/Rev)", value=max(0.5, float(globals_dict["exit_multiple_ev_rev"]) - 2.0), step=0.5)
-        mult_max = st.number_input("Exit Multiple max (EV/Rev)", value=float(globals_dict["exit_multiple_ev_rev"]) + 2.0, step=0.5)
-
-    steps = st.slider("Grid steps", 3, 9, 5)
-
-    wacc_grid = np.linspace(wacc_min, wacc_max, steps)
-    tg_grid = np.linspace(tg_min, tg_max, steps)
-    mult_grid = np.linspace(mult_min, mult_max, steps)
-
-    scenario_monthly_sel = scenario_monthly if reporting == "Monthly" else None
-    scn_ann_sel = scenarios_annual[selected]
-
-    st.divider()
-    st.markdown("### Gordon Growth Sensitivity (EV) — WACC × Terminal Growth")
-    gordon_tbl = pd.DataFrame(index=[f"{w:.2f}%" for w in wacc_grid], columns=[f"{t:.2f}%" for t in tg_grid])
-    for w in wacc_grid:
-        for t in tg_grid:
-            r = run_model_for_sensitivity(globals_dict, scn_ann_sel, scenario_monthly_sel, "Gordon Growth", w, t, float(globals_dict["exit_multiple_ev_rev"]))
-            gordon_tbl.loc[f"{w:.2f}%", f"{t:.2f}%"] = fmt_currency(r["enterprise_value"])
-    st.dataframe(gordon_tbl, use_container_width=True)
-
-    st.markdown("### Exit Multiple Sensitivity (EV) — WACC × EV/Revenue Multiple")
-    mult_tbl = pd.DataFrame(index=[f"{w:.2f}%" for w in wacc_grid], columns=[f"{m:.2f}x" for m in mult_grid])
-    for w in wacc_grid:
-        for m in mult_grid:
-            r = run_model_for_sensitivity(globals_dict, scn_ann_sel, scenario_monthly_sel, "Exit Multiple (EV/Revenue)", w, float(globals_dict["terminal_growth_pct"]), m)
-            mult_tbl.loc[f"{w:.2f}%", f"{m:.2f}x"] = fmt_currency(r["enterprise_value"])
-    st.dataframe(mult_tbl, use_container_width=True)
-
-    st.divider()
-    st.markdown("### Football Field (EV) — Gordon vs Exit Multiple + Scenarios")
-    # Build EV ranges (low/mid/high) from the grids
-    # Gordon range for selected scenario
-    g_vals = []
-    for w in wacc_grid:
-        for t in tg_grid:
-            rr = run_model_for_sensitivity(globals_dict, scn_ann_sel, scenario_monthly_sel, "Gordon Growth", w, t, float(globals_dict["exit_multiple_ev_rev"]))
-            g_vals.append(rr["enterprise_value"])
-    g_low, g_mid, g_high = float(np.nanmin(g_vals)), float(np.nanmedian(g_vals)), float(np.nanmax(g_vals))
-
-    m_vals = []
-    for w in wacc_grid:
-        for m in mult_grid:
-            rr = run_model_for_sensitivity(globals_dict, scn_ann_sel, scenario_monthly_sel, "Exit Multiple (EV/Revenue)", w, float(globals_dict["terminal_growth_pct"]), m)
-            m_vals.append(rr["enterprise_value"])
-    m_low, m_mid, m_high = float(np.nanmin(m_vals)), float(np.nanmedian(m_vals)), float(np.nanmax(m_vals))
-
-    # Scenario EV midpoints under current globals + each method
-    ff = {
-        f"{selected} – Gordon": (g_low, g_mid, g_high),
-        f"{selected} – Exit Multiple": (m_low, m_mid, m_high),
-    }
-
-    # Add scenario comparison (midpoint EV using current method inputs)
-    for scn_name in ["Bear", "Base", "Bull"]:
-        scn_month = None
-        if reporting == "Monthly":
-            # if missing, use selected monthly as best effort
-            scn_month = st.session_state.get("scenarios_monthly", {}).get(scn_name, scenario_monthly_sel)
-        rG = build_saas_model(globals_dict, scenarios_annual[scn_name], scn_month, "Gordon Growth")
-        rM = build_saas_model(globals_dict, scenarios_annual[scn_name], scn_month, "Exit Multiple (EV/Revenue)")
-        ff[f"{scn_name} – Gordon (Base inputs)"] = (rG["enterprise_value"], rG["enterprise_value"], rG["enterprise_value"])
-        ff[f"{scn_name} – Exit Mult (Base inputs)"] = (rM["enterprise_value"], rM["enterprise_value"], rM["enterprise_value"])
-
-    st.pyplot(football_field_chart(ff, "Enterprise Value – Football Field"))
 
 # =================================================
 # AUDIT TAB
@@ -1076,6 +877,44 @@ def to_excel_bytes():
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         pd.DataFrame([globals_dict]).to_excel(writer, sheet_name="Assumptions_Global", index=False)
+
+        # Annual scenarios
+        sc_rows_a = []
+        for name in ["Bear", "Base", "Bull"]:
+            d = st.session_state["scenarios_annual"][name]
+            sc_rows_a.append({
+                "Scenario": name,
+                "New Cust Growth (%)": ", ".join([f"{v:.2f}" for v in d["new_cust_growth_pct"]]),
+                "Gross Churn (%)": ", ".join([f"{v:.2f}" for v in d["gross_churn_pct"]]),
+                "NRR (%)": ", ".join([f"{v:.2f}" for v in d["nrr_pct"]]),
+                "ARPA Growth (%)": ", ".join([f"{v:.2f}" for v in d["arpa_growth_pct"]]),
+                "Gross Margin (%)": ", ".join([f"{v:.2f}" for v in d["gross_margin_pct"]]),
+                "CAC per New": ", ".join([f"{v:.2f}" for v in d["cac_per_new"]]),
+                "S&M (% Rev)": ", ".join([f"{v:.2f}" for v in d["sm_pct_rev"]]),
+                "R&D (% Rev)": ", ".join([f"{v:.2f}" for v in d["rnd_pct_rev"]]),
+                "G&A (% Rev)": ", ".join([f"{v:.2f}" for v in d["ga_pct_rev"]]),
+            })
+        pd.DataFrame(sc_rows_a).to_excel(writer, sheet_name="Scenarios_Annual", index=False)
+
+        # Monthly scenarios (if any)
+        if isinstance(st.session_state.get("scenarios_monthly"), dict) and len(st.session_state["scenarios_monthly"]) > 0:
+            sc_rows_m = []
+            for name in ["Bear", "Base", "Bull"]:
+                d = st.session_state["scenarios_monthly"].get(name, {})
+                if not d:
+                    continue
+                sc_rows_m.append({
+                    "Scenario": name,
+                    "Months": len(d.get("new_cust_growth_pct", [])),
+                    "New Cust Growth (%)": ", ".join([f"{float(v):.2f}" for v in d.get("new_cust_growth_pct", [])[:60]]),
+                    "Gross Churn (%)": ", ".join([f"{float(v):.2f}" for v in d.get("gross_churn_pct", [])[:60]]),
+                    "NRR (%)": ", ".join([f"{float(v):.2f}" for v in d.get("nrr_pct", [])[:60]]),
+                    "ARPA Growth (%)": ", ".join([f"{float(v):.2f}" for v in d.get("arpa_growth_pct", [])[:60]]),
+                    "Note": "Saved as first 60 months in this sheet for readability. Full monthly series is used in the app."
+                })
+            if sc_rows_m:
+                pd.DataFrame(sc_rows_m).to_excel(writer, sheet_name="Scenarios_Monthly_Sample", index=False)
+
         df.to_excel(writer, sheet_name="Model", index=True)
 
         audit_rows = []
