@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 # =================================================
 st.set_page_config(page_title="B2B SaaS Model – Investor Suite", layout="wide")
 st.title("🧩 B2B SaaS Financial Model – Investor Suite")
-st.caption("Assumptions • Financial Model • Dashboard • DCF • Export")
+st.caption("Assumptions • Financial Model • Dashboard • Marketing Spend • Subscriber Acquisition • DCF • Export")
 
 # =================================================
 # CSS (center align tables)
@@ -144,8 +144,6 @@ DEFAULT_GLOBALS = {
     "exit_multiple_ev_rev": 6.0,
     "base_customers": 200.0,
     "base_arpa": 6000.0,
-    # NEW: Let you separate marketing vs CAC inside total S&M
-    "brand_marketing_share_of_sm_pct": 30.0,  # % of S&M that is non-CAC "Brand/Programs"
 }
 
 DEFAULT_SCENARIOS = {
@@ -190,7 +188,7 @@ SCN_KEYS = [
 ]
 
 # =================================================
-# Safe merge utilities
+# Safe merge / normalize (prevents KeyError across reruns + old JSON)
 # =================================================
 def merge_defaults(defaults: dict, incoming: dict | None) -> dict:
     out = defaults.copy()
@@ -213,7 +211,7 @@ def normalize_scenarios(scenarios_obj: dict | None, years: int) -> dict:
     return out
 
 # =================================================
-# Session State Init (with migration)
+# Session State Init
 # =================================================
 if "globals" not in st.session_state:
     st.session_state["globals"] = DEFAULT_GLOBALS.copy()
@@ -222,6 +220,7 @@ else:
 
 if "scenarios" not in st.session_state:
     st.session_state["scenarios"] = json.loads(json.dumps(DEFAULT_SCENARIOS))
+
 if "terminal_method" not in st.session_state:
     st.session_state["terminal_method"] = "Gordon Growth"
 if "selected_scenario" not in st.session_state:
@@ -230,10 +229,12 @@ if "selected_scenario" not in st.session_state:
 # =================================================
 # Tabs
 # =================================================
-tab_assump, tab_model, tab_dash = st.tabs(["🧾 Assumptions", "📑 Financial Model", "📊 Dashboard"])
+tab_assump, tab_model, tab_dash, tab_mkt, tab_acq = st.tabs(
+    ["🧾 Assumptions", "📑 Financial Model", "📊 Dashboard", "📣 Marketing Spend", "🧲 Subscriber Acquisition"]
+)
 
 # =================================================
-# Model Builder (with separated Marketing vs Acquisition)
+# Model Builder
 # =================================================
 def build_saas_model(globals_dict: dict, scenario: dict, terminal_method: str):
     n = int(globals_dict["projection_years"])
@@ -260,48 +261,37 @@ def build_saas_model(globals_dict: dict, scenario: dict, terminal_method: str):
     capex_pct_rev = float(globals_dict["capex_pct_rev"]) / 100.0
     nwc_pct_rev = float(globals_dict["nwc_pct_rev"]) / 100.0
 
-    brand_share = float(globals_dict.get("brand_marketing_share_of_sm_pct", 30.0)) / 100.0
-    brand_share = min(max(brand_share, 0.0), 1.0)
-
     prev_nwc = 0.0
     rows = []
 
     for i in range(n):
-        # Subscriber acquisition mechanics
         new_customers = customers_beg * new_cust_growth[i]
         churned_customers = customers_beg * gross_churn[i]
         customers_end = max(customers_beg + new_customers - churned_customers, 0.0)
         customers_avg = (customers_beg + customers_end) / 2.0
-        net_adds = customers_end - customers_beg
 
         arpa = arpa * (1 + arpa_growth[i])
 
-        # ARR approximation
+        # ARR approximation (avg customers * ARPA * NRR)
         arr = customers_avg * arpa * nrr[i]
         revenue = arr * rev_rec
 
-        # Unit economics pieces
         gross_profit = revenue * gm[i]
         cogs = revenue - gross_profit
 
-        # Total S&M from % revenue
+        # Total Sales & Marketing (from % revenue)
         sm_total = revenue * sm_pct[i]
 
-        # Split S&M into Brand vs Acquisition “bucket”
-        brand_marketing = sm_total * brand_share
-
-        # CAC spend is driven by new customers
+        # CAC spend (computed)
         cac_spend = new_customers * cac[i]
 
-        # Acquisition spend = remaining S&M after brand, but at least enough to cover CAC if CAC is higher
-        # (This keeps the model sane when CAC is large.)
-        acquisition_other = max(sm_total - brand_marketing - cac_spend, 0.0)
-        acquisition_total = cac_spend + acquisition_other
+        # Non-CAC marketing spend = residual of S&M after CAC (never below 0 in display)
+        non_cac_sm = sm_total - cac_spend
 
         rnd = revenue * rnd_pct[i]
         ga = revenue * ga_pct[i]
 
-        # EBITDA (S&M already includes brand + acquisition buckets)
+        # EBITDA uses total S&M (CAC is part of it), no double count
         ebitda = gross_profit - sm_total - rnd - ga
 
         da = revenue * da_pct_rev
@@ -315,20 +305,13 @@ def build_saas_model(globals_dict: dict, scenario: dict, terminal_method: str):
 
         fcf = nopat + da - capex_val - delta_nwc
 
-        # CAC Payback (months) ~ CAC per new / (Gross Profit per customer per month)
-        # Gross profit per customer per year approx = ARPA * GM
-        gp_per_cust_per_month = (arpa * gm[i]) / 12.0 if (arpa * gm[i]) > 0 else np.nan
-        cac_payback_months = (cac[i] / gp_per_cust_per_month) if (gp_per_cust_per_month and np.isfinite(gp_per_cust_per_month)) else np.nan
-
         rows.append([
-            customers_beg, new_customers, churned_customers, net_adds, customers_end,
+            customers_beg, new_customers, churned_customers, customers_end,
             arpa, arr, revenue,
             cogs, gross_profit,
-            sm_total, brand_marketing, acquisition_total, cac_spend, acquisition_other,
-            cac_payback_months,
-            rnd, ga, ebitda,
+            sm_total, cac_spend, non_cac_sm, rnd, ga, ebitda,
             da, ebit, nopat,
-            capex_val, delta_nwc, fcf,
+            capex_val, delta_nwc, fcf
         ])
 
         customers_beg = customers_end
@@ -336,11 +319,10 @@ def build_saas_model(globals_dict: dict, scenario: dict, terminal_method: str):
     df = pd.DataFrame(
         rows,
         columns=[
-            "Customers (Beg)", "New Customers", "Churned Customers", "Net Adds", "Customers (End)",
+            "Customers (Beg)", "New Customers", "Churned Customers", "Customers (End)",
             "ARPA", "ARR", "Revenue",
             "COGS", "Gross Profit",
-            "Sales & Marketing (Total)", "Brand Marketing", "Acquisition (Total)", "CAC Spend", "Acquisition Other",
-            "CAC Payback (months)",
+            "Sales & Marketing (Total)", "CAC Spend", "Non-CAC S&M",
             "R&D", "G&A", "EBITDA",
             "D&A", "EBIT", "NOPAT",
             "Capex", "ΔNWC", "FCF",
@@ -350,6 +332,8 @@ def build_saas_model(globals_dict: dict, scenario: dict, terminal_method: str):
 
     df["Gross Margin (%)"] = np.where(df["Revenue"] > 0, (df["Gross Profit"] / df["Revenue"]) * 100, np.nan)
     df["EBITDA Margin (%)"] = np.where(df["Revenue"] > 0, (df["EBITDA"] / df["Revenue"]) * 100, np.nan)
+    df["S&M % of Revenue"] = np.where(df["Revenue"] > 0, (df["Sales & Marketing (Total)"] / df["Revenue"]) * 100, np.nan)
+    df["CAC % of S&M"] = np.where(df["Sales & Marketing (Total)"] > 0, (df["CAC Spend"] / df["Sales & Marketing (Total)"]) * 100, np.nan)
 
     discount_factors = np.array([1 / ((1 + wacc) ** (i + 1)) for i in range(n)], dtype=float)
     df["Discount Factor"] = discount_factors
@@ -388,6 +372,7 @@ with tab_assump:
     g = st.session_state["globals"]
 
     st.markdown("### Global Assumptions")
+
     c1, c2, c3, c4 = st.columns(4)
     with c1:
         g["projection_years"] = int(st.number_input("Projection Years", min_value=3, max_value=10, value=int(g.get("projection_years", 5)), step=1))
@@ -406,16 +391,6 @@ with tab_assump:
         g["cash"] = float(st.number_input("Cash", value=float(g.get("cash", 0.0)), step=100.0))
         g["base_customers"] = float(st.number_input("Starting Customers", value=float(g.get("base_customers", 200.0)), step=10.0))
         g["base_arpa"] = float(st.number_input("Starting ARPA (Annual $/Customer)", value=float(g.get("base_arpa", 6000.0)), step=250.0))
-
-    st.markdown("### Marketing Split (inside Sales & Marketing)")
-    g["brand_marketing_share_of_sm_pct"] = float(
-        st.number_input(
-            "Brand/Programs share of S&M (%)",
-            value=float(g.get("brand_marketing_share_of_sm_pct", 30.0)),
-            step=5.0,
-            help="Splits total Sales & Marketing into Brand Marketing vs Acquisition bucket."
-        )
-    )
 
     st.session_state["globals"] = g
 
@@ -479,6 +454,16 @@ with tab_assump:
             st.session_state["scenarios"][selected_scn][key] = ensure_len(values, n, fill=0.0)
         st.success(f"{selected_scn} scenario saved.")
 
+    # Warn if CAC spend > total S&M (means S&M% too low for CAC assumptions)
+    tmp_globals = merge_defaults(DEFAULT_GLOBALS, st.session_state["globals"])
+    tmp_res = build_saas_model(tmp_globals, st.session_state["scenarios"][selected_scn], st.session_state["terminal_method"])
+    tmp_df = tmp_res["df"]
+    if (tmp_df["Non-CAC S&M"] < 0).any():
+        st.warning(
+            "In some years, CAC Spend is greater than total S&M (from S&M % of revenue). "
+            "This implies you should increase S&M % or reduce CAC / acquisition growth."
+        )
+
     st.divider()
 
     st.markdown("### Save / Load Assumptions (JSON)")
@@ -538,239 +523,152 @@ all_results = {
 }
 
 # =================================================
-# FINANCIAL MODEL TAB (with separate sub-tabs)
+# FINANCIAL MODEL TAB
 # =================================================
 with tab_model:
     st.subheader(f"📑 Financial Model – {selected} Scenario")
-    sub_core, sub_acq, sub_mkt = st.tabs(["📑 Core Statements", "👥 Subscriber Acquisition", "📣 Marketing Spend"])
 
-    with sub_core:
-        # Drivers (high-level)
-        drivers = pd.DataFrame({"Line Item": [
-            "Customers (Beg)",
-            "New Customers",
-            "Churned Customers",
-            "Net Adds",
-            "Customers (End)",
-            "ARPA",
-            "ARR",
-            "Revenue",
-            "Gross Margin (%)",
-            "EBITDA Margin (%)"
-        ]})
-        for y in years:
-            drivers[y] = [
-                fmt_float2(df.loc[y, "Customers (Beg)"]),
-                fmt_float2(df.loc[y, "New Customers"]),
-                fmt_float2(df.loc[y, "Churned Customers"]),
-                fmt_float2(df.loc[y, "Net Adds"]),
-                fmt_float2(df.loc[y, "Customers (End)"]),
-                fmt_currency(df.loc[y, "ARPA"]),
-                fmt_currency(df.loc[y, "ARR"]),
-                fmt_currency(df.loc[y, "Revenue"]),
-                fmt_pct2(df.loc[y, "Gross Margin (%)"]),
-                fmt_pct2(df.loc[y, "EBITDA Margin (%)"]),
-            ]
-        show_table(drivers, "🧭 SaaS Operating Drivers")
-
-        # P&L
-        pnl = pd.DataFrame({"Line Item": [
-            "Revenue",
-            "COGS",
-            "Gross Profit",
-            "Sales & Marketing (Total)",
-            "R&D",
-            "G&A",
-            "EBITDA",
-            "D&A",
-            "EBIT",
-            "Tax Rate (%)",
-            "NOPAT"
-        ]})
-        for y in years:
-            pnl[y] = [
-                fmt_currency(df.loc[y, "Revenue"]),
-                fmt_currency(df.loc[y, "COGS"]),
-                fmt_currency(df.loc[y, "Gross Profit"]),
-                fmt_currency(df.loc[y, "Sales & Marketing (Total)"]),
-                fmt_currency(df.loc[y, "R&D"]),
-                fmt_currency(df.loc[y, "G&A"]),
-                fmt_currency(df.loc[y, "EBITDA"]),
-                fmt_currency(df.loc[y, "D&A"]),
-                fmt_currency(df.loc[y, "EBIT"]),
-                fmt_pct2(globals_dict["tax_rate_pct"]),
-                fmt_currency(df.loc[y, "NOPAT"]),
-            ]
-        show_table(pnl, "📑 Profit & Loss Statement")
-
-        # Cash Flow
-        cf = pd.DataFrame({"Line Item": [
-            "NOPAT",
-            "Add: D&A",
-            "Less: Capex",
-            "Less: ΔNWC",
-            "Free Cash Flow (FCF)"
-        ]})
-        for y in years:
-            cf[y] = [
-                fmt_currency(df.loc[y, "NOPAT"]),
-                fmt_currency(df.loc[y, "D&A"]),
-                fmt_currency(-df.loc[y, "Capex"]),
-                fmt_currency(-df.loc[y, "ΔNWC"]),
-                fmt_currency(df.loc[y, "FCF"]),
-            ]
-        show_table(cf, "💵 Cash Flow (FCF Build)")
-
-        # DCF detail
-        dcf = pd.DataFrame({"Line Item": ["FCF", "Discount Factor", "PV of FCF"]})
-        for y in years:
-            dcf[y] = [
-                fmt_currency(df.loc[y, "FCF"]),
-                fmt_float2(df.loc[y, "Discount Factor"]),
-                fmt_currency(df.loc[y, "PV of FCF"]),
-            ]
-        show_table(dcf, "💰 DCF (Detailed)")
-
-        # Valuation summary
-        tv_rows = [
-            ("Terminal Method", terminal_method),
-            ("Final Year Revenue", fmt_currency(df["Revenue"].iloc[-1])),
-            ("Final Year FCF", fmt_currency(df["FCF"].iloc[-1])),
-            ("WACC (%)", fmt_pct2(globals_dict["wacc_pct"])),
-            ("Terminal Growth (%)", fmt_pct2(globals_dict["terminal_growth_pct"])),
-            ("Exit Multiple (EV/Revenue)", fmt_float2(globals_dict["exit_multiple_ev_rev"])),
-            ("Terminal Value", fmt_currency(result["terminal_value"])),
-            ("PV of Terminal Value", fmt_currency(result["pv_terminal_value"])),
-            ("PV of Explicit FCFs", fmt_currency(result["pv_explicit"])),
-            ("Enterprise Value", fmt_currency(result["enterprise_value"])),
-            ("Less: Net Debt", fmt_currency(globals_dict["net_debt"])),
-            ("Add: Cash", fmt_currency(globals_dict["cash"])),
-            ("Equity Value", fmt_currency(result["equity_value"])),
+    drivers = pd.DataFrame({"Line Item": [
+        "Customers (Beg)",
+        "New Customers",
+        "Churned Customers",
+        "Customers (End)",
+        "ARPA",
+        "ARR",
+        "Revenue",
+        "Gross Margin (%)",
+        "EBITDA Margin (%)"
+    ]})
+    for y in years:
+        drivers[y] = [
+            fmt_float2(df.loc[y, "Customers (Beg)"]),
+            fmt_float2(df.loc[y, "New Customers"]),
+            fmt_float2(df.loc[y, "Churned Customers"]),
+            fmt_float2(df.loc[y, "Customers (End)"]),
+            fmt_currency(df.loc[y, "ARPA"]),
+            fmt_currency(df.loc[y, "ARR"]),
+            fmt_currency(df.loc[y, "Revenue"]),
+            fmt_pct2(df.loc[y, "Gross Margin (%)"]),
+            fmt_pct2(df.loc[y, "EBITDA Margin (%)"]),
         ]
-        show_table(pd.DataFrame(tv_rows, columns=["Line Item", "Amount"]), "📘 Valuation Summary")
+    show_table(drivers, "🧭 SaaS Operating Drivers")
 
-    with sub_acq:
-        st.subheader("👥 Subscriber Acquisition (Detailed)")
+    pnl = pd.DataFrame({"Line Item": [
+        "Revenue",
+        "COGS",
+        "Gross Profit",
+        "Sales & Marketing (Total)",
+        "R&D",
+        "G&A",
+        "EBITDA",
+        "D&A",
+        "EBIT",
+        "Tax Rate (%)",
+        "NOPAT"
+    ]})
+    for y in years:
+        pnl[y] = [
+            fmt_currency(df.loc[y, "Revenue"]),
+            fmt_currency(df.loc[y, "COGS"]),
+            fmt_currency(df.loc[y, "Gross Profit"]),
+            fmt_currency(df.loc[y, "Sales & Marketing (Total)"]),
+            fmt_currency(df.loc[y, "R&D"]),
+            fmt_currency(df.loc[y, "G&A"]),
+            fmt_currency(df.loc[y, "EBITDA"]),
+            fmt_currency(df.loc[y, "D&A"]),
+            fmt_currency(df.loc[y, "EBIT"]),
+            fmt_pct2(globals_dict["tax_rate_pct"]),
+            fmt_currency(df.loc[y, "NOPAT"]),
+        ]
+    show_table(pnl, "📑 Profit & Loss Statement")
 
-        # Acquisition bridge table
-        acq = pd.DataFrame({"Line Item": [
-            "Customers (Beg)",
-            "New Customers",
-            "Churned Customers",
-            "Net Adds",
-            "Customers (End)",
-            "CAC per New Customer",
-            "CAC Spend",
-            "CAC Payback (months)"
-        ]})
+    cf = pd.DataFrame({"Line Item": [
+        "NOPAT",
+        "Add: D&A",
+        "Less: Capex",
+        "Less: ΔNWC",
+        "Free Cash Flow (FCF)"
+    ]})
+    for y in years:
+        cf[y] = [
+            fmt_currency(df.loc[y, "NOPAT"]),
+            fmt_currency(df.loc[y, "D&A"]),
+            fmt_currency(-df.loc[y, "Capex"]),
+            fmt_currency(-df.loc[y, "ΔNWC"]),
+            fmt_currency(df.loc[y, "FCF"]),
+        ]
+    show_table(cf, "💵 Cash Flow (FCF Build)")
 
-        scn = st.session_state["scenarios"][selected]
-        cac_per_new = np.array(ensure_len(scn["cac_per_new"], n, fill=0.0), dtype=float)
+    dcf = pd.DataFrame({"Line Item": ["FCF", "Discount Factor", "PV of FCF"]})
+    for y in years:
+        dcf[y] = [
+            fmt_currency(df.loc[y, "FCF"]),
+            fmt_float2(df.loc[y, "Discount Factor"]),
+            fmt_currency(df.loc[y, "PV of FCF"]),
+        ]
+    show_table(dcf, "💰 DCF (Detailed)")
 
-        for i, y in enumerate(years):
-            acq[y] = [
-                fmt_float2(df.loc[y, "Customers (Beg)"]),
-                fmt_float2(df.loc[y, "New Customers"]),
-                fmt_float2(df.loc[y, "Churned Customers"]),
-                fmt_float2(df.loc[y, "Net Adds"]),
-                fmt_float2(df.loc[y, "Customers (End)"]),
-                fmt_currency(cac_per_new[i]),
-                fmt_currency(df.loc[y, "CAC Spend"]),
-                fmt_float2(df.loc[y, "CAC Payback (months)"]) if np.isfinite(df.loc[y, "CAC Payback (months)"]) else "",
-            ]
-        show_table(acq, "Acquisition Rollforward & CAC")
+    tv_rows = [
+        ("Terminal Method", terminal_method),
+        ("Final Year Revenue", fmt_currency(df["Revenue"].iloc[-1])),
+        ("Final Year FCF", fmt_currency(df["FCF"].iloc[-1])),
+        ("WACC (%)", fmt_pct2(globals_dict["wacc_pct"])),
+        ("Terminal Growth (%)", fmt_pct2(globals_dict["terminal_growth_pct"])),
+        ("Exit Multiple (EV/Revenue)", fmt_float2(globals_dict["exit_multiple_ev_rev"])),
+        ("Terminal Value", fmt_currency(result["terminal_value"])),
+        ("PV of Terminal Value", fmt_currency(result["pv_terminal_value"])),
+        ("PV of Explicit FCFs", fmt_currency(result["pv_explicit"])),
+        ("Enterprise Value", fmt_currency(result["enterprise_value"])),
+        ("Less: Net Debt", fmt_currency(globals_dict["net_debt"])),
+        ("Add: Cash", fmt_currency(globals_dict["cash"])),
+        ("Equity Value", fmt_currency(result["equity_value"])),
+    ]
+    show_table(pd.DataFrame(tv_rows, columns=["Line Item", "Amount"]), "📘 Valuation Summary")
 
-        # Helpful KPIs
-        k1, k2, k3, k4 = st.columns(4)
-        with k1:
-            st.metric("Avg CAC Payback (mo)", fmt_float2(np.nanmean(df["CAC Payback (months)"].values)))
-        with k2:
-            st.metric("Total New Customers", fmt_float2(df["New Customers"].sum()))
-        with k3:
-            st.metric("Total Churned", fmt_float2(df["Churned Customers"].sum()))
-        with k4:
-            st.metric("Total CAC Spend", fmt_currency(df["CAC Spend"].sum()))
+    st.subheader("⬇️ Export Excel")
 
-        # Simple charts
-        st.markdown("### Customers: New vs Churn")
-        fig, ax = plt.subplots()
-        x = np.arange(len(years))
-        ax.plot(x, df["New Customers"].values, marker="o", label="New Customers")
-        ax.plot(x, df["Churned Customers"].values, marker="o", label="Churned Customers")
-        ax.set_xticks(x)
-        ax.set_xticklabels(years)
-        ax.grid(False)
-        add_point_labels(ax, x, df["New Customers"].values, is_pct=False)
-        add_point_labels(ax, x, df["Churned Customers"].values, is_pct=False)
-        ax.legend(loc="best")
-        fig.tight_layout()
-        st.pyplot(fig)
+    def to_excel_bytes():
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+            pd.DataFrame([globals_dict]).to_excel(writer, sheet_name="Assumptions_Global", index=False)
 
-        st.markdown("### CAC Spend & CAC Payback (months)")
-        st.pyplot(dual_axis_line_chart(
-            title="CAC Spend vs CAC Payback",
-            x_labels=years,
-            y_left=df["CAC Spend"].values,
-            y_right=df["CAC Payback (months)"].values,
-            left_label="CAC Spend",
-            right_label="CAC Payback (months)",
-            left_color="#1f77b4",
-            right_color="#ff7f0e",
-            right_is_pct=False
-        ))
+            sc_rows = []
+            for name in ["Bear", "Base", "Bull"]:
+                d = st.session_state["scenarios"][name]
+                sc_rows.append({
+                    "Scenario": name,
+                    "New Cust Growth (%)": ", ".join([f"{v:.2f}" for v in d["new_cust_growth_pct"]]),
+                    "Gross Churn (%)": ", ".join([f"{v:.2f}" for v in d["gross_churn_pct"]]),
+                    "NRR (%)": ", ".join([f"{v:.2f}" for v in d["nrr_pct"]]),
+                    "ARPA Growth (%)": ", ".join([f"{v:.2f}" for v in d["arpa_growth_pct"]]),
+                    "Gross Margin (%)": ", ".join([f"{v:.2f}" for v in d["gross_margin_pct"]]),
+                    "CAC per New": ", ".join([f"{v:.2f}" for v in d["cac_per_new"]]),
+                    "S&M (% Rev)": ", ".join([f"{v:.2f}" for v in d["sm_pct_rev"]]),
+                    "R&D (% Rev)": ", ".join([f"{v:.2f}" for v in d["rnd_pct_rev"]]),
+                    "G&A (% Rev)": ", ".join([f"{v:.2f}" for v in d["ga_pct_rev"]]),
+                })
+            pd.DataFrame(sc_rows).to_excel(writer, sheet_name="Assumptions_Scenarios", index=False)
 
-    with sub_mkt:
-        st.subheader("📣 Marketing Spend (Detailed)")
+            df.to_excel(writer, sheet_name="Model", index=True)
 
-        # Marketing carve-out table
-        mkt = pd.DataFrame({"Line Item": [
-            "Sales & Marketing (Total)",
-            "Brand Marketing",
-            "Acquisition (Total)",
-            "CAC Spend",
-            "Acquisition Other",
-            "Brand Marketing Share of S&M (%)"
-        ]})
+            pnl_num = df[["Revenue", "COGS", "Gross Profit", "Sales & Marketing (Total)", "R&D", "G&A", "EBITDA", "EBIT", "NOPAT"]].copy()
+            pnl_num.to_excel(writer, sheet_name="PnL", index=True)
 
-        brand_share_pct = float(globals_dict.get("brand_marketing_share_of_sm_pct", 30.0))
+            cf_num = df[["NOPAT", "D&A", "Capex", "ΔNWC", "FCF", "Discount Factor", "PV of FCF"]].copy()
+            cf_num.to_excel(writer, sheet_name="CashFlow_DCF", index=True)
 
-        for y in years:
-            total_sm = df.loc[y, "Sales & Marketing (Total)"]
-            mkt[y] = [
-                fmt_currency(total_sm),
-                fmt_currency(df.loc[y, "Brand Marketing"]),
-                fmt_currency(df.loc[y, "Acquisition (Total)"]),
-                fmt_currency(df.loc[y, "CAC Spend"]),
-                fmt_currency(df.loc[y, "Acquisition Other"]),
-                fmt_pct2(brand_share_pct),
-            ]
-        show_table(mkt, "Marketing Spend Breakdown")
+            mkt_num = df[["Sales & Marketing (Total)", "CAC Spend", "Non-CAC S&M", "CAC % of S&M", "S&M % of Revenue"]].copy()
+            mkt_num.to_excel(writer, sheet_name="Marketing", index=True)
 
-        # KPIs
-        k1, k2, k3 = st.columns(3)
-        with k1:
-            st.metric("Total S&M", fmt_currency(df["Sales & Marketing (Total)"].sum()))
-        with k2:
-            st.metric("Total Brand Marketing", fmt_currency(df["Brand Marketing"].sum()))
-        with k3:
-            st.metric("Total Acquisition", fmt_currency(df["Acquisition (Total)"].sum()))
+        output.seek(0)
+        return output.getvalue()
 
-        # Charts
-        st.markdown("### S&M Split: Brand vs Acquisition")
-        fig, ax = plt.subplots()
-        x = np.arange(len(years))
-        ax.plot(x, df["Sales & Marketing (Total)"].values, marker="o", label="Total S&M")
-        ax.plot(x, df["Brand Marketing"].values, marker="o", label="Brand Marketing")
-        ax.plot(x, df["Acquisition (Total)"].values, marker="o", label="Acquisition (Total)")
-        ax.set_xticks(x)
-        ax.set_xticklabels(years)
-        ax.grid(False)
-        add_point_labels(ax, x, df["Sales & Marketing (Total)"].values, is_pct=False)
-        add_point_labels(ax, x, df["Brand Marketing"].values, is_pct=False)
-        add_point_labels(ax, x, df["Acquisition (Total)"].values, is_pct=False)
-        ax.legend(loc="best")
-        fig.tight_layout()
-        st.pyplot(fig)
+    st.download_button(
+        "Download Excel Workbook",
+        data=to_excel_bytes(),
+        file_name=f"b2b_saas_model_{selected.lower()}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
 
 # =================================================
 # DASHBOARD TAB
@@ -798,10 +696,10 @@ with tab_dash:
     })
     show_table(comp)
 
-    # Revenue & new customer growth
+    st.markdown("### Revenue & New Customer Growth (%)")
     scn = st.session_state["scenarios"][selected]
     new_growth = np.array(ensure_len(scn["new_cust_growth_pct"], n, fill=0.0), dtype=float)
-    st.markdown("### Revenue & New Customer Growth (%)")
+
     st.pyplot(dual_axis_line_chart(
         title="Revenue vs New Customer Growth",
         x_labels=years,
@@ -814,7 +712,6 @@ with tab_dash:
         right_is_pct=True,
     ))
 
-    # EBITDA & margin
     st.markdown("### EBITDA & EBITDA Margin (%)")
     st.pyplot(dual_axis_line_chart(
         title="EBITDA vs EBITDA Margin",
@@ -828,24 +725,13 @@ with tab_dash:
         right_is_pct=True,
     ))
 
-    # PAT proxy (NOPAT) and FCF
-    st.markdown("### NOPAT")
-    fig, ax = plt.subplots()
-    x_pos = np.arange(len(years))
-    ax.plot(x_pos, df["NOPAT"].values, marker="o", label="NOPAT")
-    ax.set_xticks(x_pos)
-    ax.set_xticklabels(years)
-    ax.grid(False)
-    add_point_labels(ax, x_pos, df["NOPAT"].values, is_pct=False)
-    ax.legend(loc="best")
-    fig.tight_layout()
-    st.pyplot(fig)
-
     st.markdown("### Free Cash Flow (FCF)")
     fig, ax = plt.subplots()
-    ax.plot(x_pos, df["FCF"].values, marker="o", label="FCF")
+    x_pos = np.arange(len(years))
+    ax.plot(x_pos, df["FCF"].values, marker="o", color="#8c564b", label="FCF")
     ax.set_xticks(x_pos)
     ax.set_xticklabels(years)
+    ax.set_ylabel("FCF")
     ax.grid(False)
     add_point_labels(ax, x_pos, df["FCF"].values, is_pct=False)
     ax.legend(loc="best")
@@ -853,53 +739,207 @@ with tab_dash:
     st.pyplot(fig)
 
 # =================================================
-# Export Excel (one button at bottom so it always exists)
+# MARKETING SPEND TAB (new)
 # =================================================
-st.divider()
-st.subheader("⬇️ Export Excel Workbook")
+with tab_mkt:
+    st.subheader(f"📣 Marketing Spend – {selected} Scenario")
+    st.caption("Breakdown of total Sales & Marketing into CAC-driven acquisition spend vs. other/brand/field marketing.")
 
-def to_excel_bytes():
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        pd.DataFrame([globals_dict]).to_excel(writer, sheet_name="Assumptions_Global", index=False)
+    # Table
+    mkt_tbl = pd.DataFrame({"Line Item": [
+        "Revenue",
+        "Sales & Marketing (Total)",
+        "S&M % of Revenue",
+        "CAC Spend",
+        "Non-CAC S&M",
+        "CAC % of S&M",
+        "New Customers",
+        "CAC per New Customer",
+    ]})
+    scn = st.session_state["scenarios"][selected]
+    cac_per_new = np.array(ensure_len(scn["cac_per_new"], n, fill=0.0), dtype=float)
 
-        sc_rows = []
-        for name in ["Bear", "Base", "Bull"]:
-            d = st.session_state["scenarios"][name]
-            sc_rows.append({
-                "Scenario": name,
-                "New Cust Growth (%)": ", ".join([f"{v:.2f}" for v in d["new_cust_growth_pct"]]),
-                "Gross Churn (%)": ", ".join([f"{v:.2f}" for v in d["gross_churn_pct"]]),
-                "NRR (%)": ", ".join([f"{v:.2f}" for v in d["nrr_pct"]]),
-                "ARPA Growth (%)": ", ".join([f"{v:.2f}" for v in d["arpa_growth_pct"]]),
-                "Gross Margin (%)": ", ".join([f"{v:.2f}" for v in d["gross_margin_pct"]]),
-                "CAC per New": ", ".join([f"{v:.2f}" for v in d["cac_per_new"]]),
-                "S&M (% Rev)": ", ".join([f"{v:.2f}" for v in d["sm_pct_rev"]]),
-                "R&D (% Rev)": ", ".join([f"{v:.2f}" for v in d["rnd_pct_rev"]]),
-                "G&A (% Rev)": ", ".join([f"{v:.2f}" for v in d["ga_pct_rev"]]),
-            })
-        pd.DataFrame(sc_rows).to_excel(writer, sheet_name="Assumptions_Scenarios", index=False)
+    for i, y in enumerate(years):
+        mkt_tbl[y] = [
+            fmt_currency(df.loc[y, "Revenue"]),
+            fmt_currency(df.loc[y, "Sales & Marketing (Total)"]),
+            fmt_pct2(df.loc[y, "S&M % of Revenue"]),
+            fmt_currency(df.loc[y, "CAC Spend"]),
+            fmt_currency(df.loc[y, "Non-CAC S&M"]),
+            fmt_pct2(df.loc[y, "CAC % of S&M"]),
+            fmt_float2(df.loc[y, "New Customers"]),
+            fmt_currency(cac_per_new[i]),
+        ]
+    show_table(mkt_tbl, "Marketing Spend Detail")
 
-        df.to_excel(writer, sheet_name="Model", index=True)
+    # Chart: Stacked bar S&M split
+    st.markdown("### S&M split: CAC vs Non-CAC (stacked)")
+    x = np.arange(len(years))
+    cac_vals = df["CAC Spend"].values
+    non_cac_vals = np.maximum(df["Non-CAC S&M"].values, 0.0)
 
-        # Extra dedicated sheets for your request
-        acq_sheet = df[[
-            "Customers (Beg)", "New Customers", "Churned Customers", "Net Adds", "Customers (End)",
-            "CAC Spend", "CAC Payback (months)"
-        ]].copy()
-        acq_sheet.to_excel(writer, sheet_name="Subscriber_Acquisition", index=True)
+    fig, ax = plt.subplots()
+    ax.bar(x, cac_vals, label="CAC Spend")
+    ax.bar(x, non_cac_vals, bottom=cac_vals, label="Non-CAC S&M")
+    ax.set_xticks(x)
+    ax.set_xticklabels(years)
+    ax.set_ylabel("Spend")
+    ax.grid(False)
+    # labels on top of stacks
+    totals = cac_vals + non_cac_vals
+    for i, t in enumerate(totals):
+        ax.annotate(f"{t:,.0f}", (x[i], t), textcoords="offset points", xytext=(0, 8),
+                    ha="center", va="bottom", fontsize=9, clip_on=True)
+    ax.legend(loc="best")
+    fig.tight_layout()
+    st.pyplot(fig)
 
-        mkt_sheet = df[[
-            "Sales & Marketing (Total)", "Brand Marketing", "Acquisition (Total)", "CAC Spend", "Acquisition Other"
-        ]].copy()
-        mkt_sheet.to_excel(writer, sheet_name="Marketing_Spend", index=True)
+    # Chart: CAC % of S&M
+    st.markdown("### CAC % of S&M")
+    fig, ax = plt.subplots()
+    ax.plot(x, df["CAC % of S&M"].values, marker="o", label="CAC % of S&M")
+    ax.set_xticks(x)
+    ax.set_xticklabels(years)
+    ax.set_ylabel("Percent")
+    ax.grid(False)
+    add_point_labels(ax, x, df["CAC % of S&M"].values, is_pct=True)
+    ax.legend(loc="best")
+    fig.tight_layout()
+    st.pyplot(fig)
 
-    output.seek(0)
-    return output.getvalue()
+    # Diagnostics
+    if (df["Non-CAC S&M"] < 0).any():
+        st.warning(
+            "In some years, CAC Spend > Total S&M (S&M% of Revenue). "
+            "Non-CAC S&M becomes negative, which typically indicates inconsistent assumptions."
+        )
 
-st.download_button(
-    "Download Excel Workbook",
-    data=to_excel_bytes(),
-    file_name=f"b2b_saas_model_{selected.lower()}.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-)
+# =================================================
+# SUBSCRIBER ACQUISITION TAB (new)
+# =================================================
+with tab_acq:
+    st.subheader(f"🧲 Subscriber Acquisition – {selected} Scenario")
+    st.caption("Customer waterfall + acquisition efficiency metrics (CAC, LTV, payback proxy).")
+
+    # Build acquisition metrics
+    scn = st.session_state["scenarios"][selected]
+    churn_pct = np.array(ensure_len(scn["gross_churn_pct"], n, fill=0.0), dtype=float) / 100.0
+    gm_pct = np.array(ensure_len(scn["gross_margin_pct"], n, fill=75.0), dtype=float) / 100.0
+    cac_per_new = np.array(ensure_len(scn["cac_per_new"], n, fill=0.0), dtype=float)
+
+    # Contribution margin per customer per year (gross profit per customer proxy)
+    # = ARPA * GM
+    contrib_per_cust = df["ARPA"].values * gm_pct
+
+    # LTV (gross) approx = (ARPA*GM) / churn_rate
+    ltv = np.where(churn_pct > 0, contrib_per_cust / churn_pct, np.nan)
+
+    # LTV/CAC
+    ltv_cac = np.where(cac_per_new > 0, ltv / cac_per_new, np.nan)
+
+    # CAC payback months (proxy) = CAC / (monthly gross profit per customer)
+    monthly_contrib = np.where(contrib_per_cust > 0, contrib_per_cust / 12.0, np.nan)
+    payback_months = np.where(monthly_contrib > 0, cac_per_new / monthly_contrib, np.nan)
+
+    # Table
+    acq_tbl = pd.DataFrame({"Line Item": [
+        "Customers (Beg)",
+        "New Customers",
+        "Churned Customers",
+        "Customers (End)",
+        "Net Adds",
+        "CAC per New Customer",
+        "CAC Spend",
+        "ARPA",
+        "Gross Margin (%)",
+        "Gross Profit / Customer (annual)",
+        "LTV (gross) (approx)",
+        "LTV / CAC",
+        "CAC Payback (months) (proxy)"
+    ]})
+
+    for i, y in enumerate(years):
+        net_adds = df.loc[y, "Customers (End)"] - df.loc[y, "Customers (Beg)"]
+        acq_tbl[y] = [
+            fmt_float2(df.loc[y, "Customers (Beg)"]),
+            fmt_float2(df.loc[y, "New Customers"]),
+            fmt_float2(df.loc[y, "Churned Customers"]),
+            fmt_float2(df.loc[y, "Customers (End)"]),
+            fmt_float2(net_adds),
+            fmt_currency(cac_per_new[i]),
+            fmt_currency(df.loc[y, "CAC Spend"]),
+            fmt_currency(df.loc[y, "ARPA"]),
+            fmt_pct2(df.loc[y, "Gross Margin (%)"]),
+            fmt_currency(contrib_per_cust[i]),
+            fmt_currency(ltv[i]) if np.isfinite(ltv[i]) else "",
+            fmt_float2(ltv_cac[i]) if np.isfinite(ltv_cac[i]) else "",
+            fmt_float2(payback_months[i]) if np.isfinite(payback_months[i]) else "",
+        ]
+    show_table(acq_tbl, "Subscriber Acquisition Detail")
+
+    # Charts
+    x = np.arange(len(years))
+
+    st.markdown("### Customer Waterfall (Begin vs End) + New / Churn")
+    fig, ax = plt.subplots()
+    ax.plot(x, df["Customers (Beg)"].values, marker="o", label="Customers (Beg)")
+    ax.plot(x, df["Customers (End)"].values, marker="o", label="Customers (End)")
+    ax.bar(x - 0.2, df["New Customers"].values, width=0.4, label="New Customers")
+    ax.bar(x + 0.2, df["Churned Customers"].values, width=0.4, label="Churned Customers")
+    ax.set_xticks(x)
+    ax.set_xticklabels(years)
+    ax.set_ylabel("Customers")
+    ax.grid(False)
+    ax.legend(loc="best")
+    fig.tight_layout()
+    st.pyplot(fig)
+
+    st.markdown("### CAC per New vs LTV (gross) (approx)")
+    fig, ax = plt.subplots()
+    ax.plot(x, cac_per_new, marker="o", label="CAC per New")
+    ax.plot(x, ltv, marker="o", label="LTV (gross) approx")
+    ax.set_xticks(x)
+    ax.set_xticklabels(years)
+    ax.set_ylabel("Currency")
+    ax.grid(False)
+    add_point_labels(ax, x, cac_per_new, is_pct=False)
+    # labels for LTV can be huge; label only if finite and not insane
+    for i, val in enumerate(ltv):
+        if np.isfinite(val) and val < 10_000_000:
+            ax.annotate(f"{val:,.0f}", (x[i], val), textcoords="offset points", xytext=(0, 8),
+                        ha="center", va="bottom", fontsize=9, clip_on=True)
+    ax.legend(loc="best")
+    fig.tight_layout()
+    st.pyplot(fig)
+
+    st.markdown("### LTV/CAC and Payback (months)")
+    fig, ax1 = plt.subplots()
+    ax2 = ax1.twinx()
+
+    ax1.plot(x, ltv_cac, marker="o", label="LTV/CAC")
+    ax2.plot(x, payback_months, marker="o", linestyle="--", label="Payback (months)")
+
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(years)
+    ax1.set_ylabel("LTV/CAC (x)")
+    ax2.set_ylabel("Payback (months)")
+    ax1.grid(False)
+    ax2.grid(False)
+
+    # label points
+    for i, v in enumerate(ltv_cac):
+        if np.isfinite(v):
+            ax1.annotate(f"{v:.2f}x", (x[i], v), textcoords="offset points", xytext=(0, 8),
+                         ha="center", va="bottom", fontsize=9, clip_on=True)
+    for i, v in enumerate(payback_months):
+        if np.isfinite(v):
+            ax2.annotate(f"{v:.1f}", (x[i], v), textcoords="offset points", xytext=(0, -14),
+                         ha="center", va="top", fontsize=9, clip_on=True)
+
+    # combined legend
+    l1, lb1 = ax1.get_legend_handles_labels()
+    l2, lb2 = ax2.get_legend_handles_labels()
+    ax1.legend(l1 + l2, lb1 + lb2, loc="best")
+
+    fig.tight_layout()
+    st.pyplot(fig)
