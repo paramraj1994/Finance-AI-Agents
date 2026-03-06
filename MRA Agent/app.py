@@ -1,20 +1,12 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-
-# Safe Plotly Import
-try:
-    import plotly.express as px
-except:
-    import subprocess, sys
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "plotly"])
-    import plotly.express as px
+import plotly.express as px
 
 st.set_page_config(page_title="FP&A Monthly Reporting Dashboard", layout="wide")
 
 st.title("📊 FP&A Monthly Reporting Analysis")
 
-# Upload file
 uploaded_file = st.file_uploader("Upload Financial Data (CSV or Excel)", type=["csv","xlsx"])
 
 if uploaded_file is not None:
@@ -27,7 +19,6 @@ if uploaded_file is not None:
     st.subheader("Raw Data")
     st.dataframe(df)
 
-    # Month selection
     if "Month" in df.columns:
         month = st.selectbox("Select Month", df["Month"].unique())
         filtered_df = df[df["Month"] == month]
@@ -37,17 +28,14 @@ if uploaded_file is not None:
     st.subheader("Filtered Data")
     st.dataframe(filtered_df)
 
-    # Revenue chart
     if "Revenue" in df.columns and "Month" in df.columns:
         fig = px.line(df, x="Month", y="Revenue", title="Revenue Trend")
         st.plotly_chart(fig, use_container_width=True)
 
-    # Expense chart
     if "Expense" in df.columns and "Month" in df.columns:
         fig2 = px.bar(df, x="Month", y="Expense", title="Expense Trend")
         st.plotly_chart(fig2, use_container_width=True)
 
-    # KPI metrics
     col1, col2, col3 = st.columns(3)
 
     if "Revenue" in df.columns:
